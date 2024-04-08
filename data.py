@@ -6,8 +6,19 @@ import h5py
 import torch
 from torch.utils.data import DataLoader, Dataset
 import tqdm
+from torch.utils.data import Sampler
 
+class CustomSampler(Sampler):
+    def __init__(self, indices, start_index=0):
 
+        self.indices = indices[start_index:] + indices[:start_index]
+    
+    def __iter__(self):
+        return iter(self.indices)
+    
+    def __len__(self):
+        return len(self.indices)
+    
 class CoLDataset(Dataset):
     IGNORE_ID = -100
     sent_strategy = 'first'
@@ -16,8 +27,10 @@ class CoLDataset(Dataset):
                  split_sent=False, voken_dir=None, suffix=None, verbose=False,
                  voken_ablation=None):
 
+
         # Open token's hdf5
         token_path = file_path + '.' + tokenizer_name + '.hdf5'
+        print(token_path)
         assert os.path.isfile(token_path)
         if verbose:
             print("-------- Load Data -------")
@@ -98,7 +111,7 @@ class CoLDataset(Dataset):
     def __getitem__(self, item):
         token_start, token_end = self.batches[item]
         if self._iter_cnt < 5 and self.verbose:
-            print(f"Data Loader: data iteration {self._iter_cnt}, with range {token_start} to {token_end}.")
+            #print(f"Data Loader: data iteration {self._iter_cnt}, with range {token_start} to {token_end}.")
             self._iter_cnt += 1
         tokens = list(self.tokens[token_start: token_end])
         token_tensor = torch.tensor(

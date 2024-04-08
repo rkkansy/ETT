@@ -69,7 +69,7 @@ class SimpleBertForMaskedLM(BertForMaskedLM):
         loss_fct = CrossEntropyLoss()
         token_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), masked_lm_labels.view(-1))
 
-        return {'loss': token_loss, 'lm_loss': token_loss}
+        return {'loss': token_loss, 'lm_loss': token_loss, 'logits': prediction_scores}
 
 class SimpleRobertaForMaskedLM(RobertaForMaskedLM):
 

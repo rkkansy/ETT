@@ -33,6 +33,8 @@ import sys
 from typing import Dict, List, Tuple
 from datetime import datetime
 import time 
+import threading
+import h5py
 
 import numpy as np
 import torch
@@ -60,7 +62,7 @@ from transformers import (
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
-from data import CoLDataset
+from data import CoLDataset, CustomSampler
 from param import process_args
 from model import SimpleBertForMaskedLM, SimpleRobertaForMaskedLM
 
@@ -73,6 +75,9 @@ from ligo import initialize_model_with_ligo
 
 logger = logging.getLogger(__name__)
 
+train_dynamics_buffer0 = []
+train_dynamics_buffer1 = []
+current_buffer = 0
 
 MODEL_CLASSES = {
     "bert": (BertConfig, SimpleBertForMaskedLM, BertTokenizer),
@@ -159,15 +164,17 @@ def set_seed(args):
     torch.manual_seed(args.seed)
 
 
-def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args) -> Tuple[torch.Tensor, torch.Tensor]:
+def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args, get_mask=False):
     """ Prepare masked tokens inputs/labels for masked language modeling: 80% MASK, 10% random, 10% original. """
 
     if tokenizer.mask_token is None:
         raise ValueError(
             "This tokenizer does not have a mask token which is necessary for masked language modeling. Remove the --mlm flag if you want to use this tokenizer."
         )
-
+    
     labels = inputs.clone()
+    operation_mask = torch.zeros(labels.shape, dtype=torch.int8)
+
     # We sample a few tokens in each sequence for masked-LM training (with probability args.mlm_probability defaults to 0.15 in Bert/RoBERTa)
     probability_matrix = torch.full(labels.shape, args.mlm_probability)
     special_tokens_mask = [
@@ -189,13 +196,52 @@ def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args) -> T
     random_words = torch.randint(len(tokenizer), labels.shape, dtype=torch.long)
     inputs[indices_random] = random_words[indices_random]
 
-    # The rest of the time (10% of the time) we keep the masked input tokens unchanged
-    return inputs, labels
+    if get_mask:
+        operation_mask[indices_replaced] = 1  # Masked tokens marked as 1
+        operation_mask[indices_random] = 2  # Randomized tokens marked as 2
+        indices_kept = masked_indices & ~indices_replaced & ~indices_random
+        operation_mask[indices_kept] = 3
 
+    # The rest of the time (10% of the time) we keep the masked input tokens unchanged
+    return inputs, labels, operation_mask
+
+
+def decode_tokens_with_mask(tokenizer, inputs, masked_indices):
+
+    tokens = tokenizer.convert_ids_to_tokens(inputs.tolist())
+    for idx, mask in enumerate(masked_indices):
+        if mask:
+            tokens[idx] = '[MASK]'
+    return tokenizer.convert_tokens_to_string(tokens)
+
+    
+def initialize_hdf5_file(filename, instance_list, max_position_embeddings, probs_length=10):
+
+    with h5py.File(filename, 'w') as f:
+
+        f.create_dataset("masks", shape=(len(instance_list), max_position_embeddings), dtype=np.int8)
+        f.create_dataset("summed_probs", shape=(len(instance_list), probs_length), dtype=np.float32)
+        f.create_dataset("instance_order", data=np.array(instance_list, dtype=np.int32))
+
+def add_masks_batch(filename, instance_indices, masks):
+
+    with h5py.File(filename, 'a') as f:
+        for i, idx in enumerate(instance_indices):
+            f["masks"][idx] = masks[i]
+
+def add_probs_batch(filename, instance_indices, probs, epoch):
+
+    print(len(instance_indices))
+    print(len(probs))
+    with h5py.File(filename, 'a') as f: 
+        for i, idx in enumerate(instance_indices):
+            if probs[i] != 0:
+                print(i)
+            f["summed_probs"][idx, epoch] = probs[i]
 
 def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> Tuple[int, float]:
     set_seed(args)  # Added here for reproducibility
-
+    info = False
     """ Train the model """
     if args.gpu == 0:
         current_time = datetime.now().strftime('%b%d_%H-%M-%S')
@@ -213,16 +259,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                        f"GPU: {args.gpu},"
                        f"Rank: {args.rank},"
                        f"Total: {args.world_size}")
-    train_sampler = DistributedSampler(
-        train_dataset,
-        num_replicas=args.world_size,
-        rank=args.rank,
-        shuffle=args.shuffle,
-    )
-    train_dataloader = DataLoader(
-        train_dataset, sampler=train_sampler, shuffle=False, num_workers=0,
-        batch_size=args.train_batch_size, collate_fn=collate, pin_memory=True
-    )
+
 
     t_total = args.max_steps
 
@@ -289,34 +326,45 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
     # Train!
     logger.info("***** Running training *****")
-    logger.info("  Num examples = %d", len(train_dataset))
-    logger.info("  Instantaneous batch size per GPU = %d", args.per_gpu_train_batch_size)
-    logger.info(
-        "  Total train batch size (w. distributed & accumulation) = %d",
-        args.train_batch_size
-        * args.gradient_accumulation_steps
-        * args.world_size
-    )
-    logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
-    logger.info("  Total optimization steps = %d", t_total)
-
+    if info:
+        logger.info("  Num examples = %d", len(train_dataset))
+        logger.info("  Instantaneous batch size per GPU = %d", args.per_gpu_train_batch_size)
+        logger.info(
+            "  Total train batch size (w. distributed & accumulation) = %d",
+            args.train_batch_size
+            * args.gradient_accumulation_steps
+            * args.world_size
+        )
+        logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
+        logger.info("  Total optimization steps = %d", t_total)
+        
     global_step = 0
     epochs_trained = 0
+
+    instance_list = list(range(0, len(train_dataset)))
+    random.shuffle(instance_list)
+
     # Check if continuing training from a checkpoint
     if args.model_name_or_path and os.path.exists(args.model_name_or_path):
         try:
             # set global_step to gobal_step of last saved checkpoint from model path
             checkpoint_name = os.path.basename(args.model_name_or_path)
             global_step = int(checkpoint_name.split("-")[-1])
-            epochs_trained = global_step // (len(train_dataloader) // args.gradient_accumulation_steps)
-            steps_trained_in_current_epoch = global_step % (len(train_dataloader) // args.gradient_accumulation_steps)
-            logger.info("  Continuing training from checkpoint, will skip to saved global_step")
             logger.info("  Continuing training from iter %d, epoch %d" % (global_step, epochs_trained))
+
         except ValueError:
             logger.info("  Do not load model from %s, restart training" % args.model_name_or_path)
 
     model.zero_grad()
+    start_index=global_step * args.train_batch_size
 
+    train_sampler = CustomSampler(instance_list, start_index)
+    #instance_list = instance_list[start_index:] + instance_list[:start_index]
+
+    train_dataloader = DataLoader(
+        train_dataset, sampler=train_sampler, shuffle=False, num_workers=0,
+        batch_size=args.train_batch_size, collate_fn=collate, pin_memory=True
+    )
     # IMPORTANT: save the initialization
     if args.gpu == 0 and global_step == 0:
         checkpoint_name = f"checkpoint-{global_step:08d}"
@@ -324,15 +372,29 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         os.makedirs(ckpt_dir, exist_ok=True)
         save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler)
 
+    if args.track_dynamics:
+        token_masks = np.zeros((args.logging_steps * args.train_batch_size, args.block_size + 2), dtype=np.int8) 
+        summed_confidence = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
+        initialize_hdf5_file(args.dynamics_path, instance_list, args.block_size + 2)
+
     while True:
         epoch_iterator = tqdm(train_dataloader, desc=f"Epoch: {epochs_trained:03d}", disable=args.gpu != 0)
         tr_loss, tr_lm_loss = 0.0, 0.0
         t_start = time.time()
         model.zero_grad()       # Support of accumulating gradients
+        
         for step, batch in enumerate(epoch_iterator):
-            inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
+            
+            insert_idx = (step % args.logging_steps) * args.train_batch_size 
+
+            inputs, labels, token_mask = mask_tokens(batch, tokenizer, args, get_mask=True)
             inputs = inputs.to(args.device)
             labels = labels.to(args.device)
+
+            if step == 0:
+                print(inputs[10])
+                print(train_dataset[instance_list[start_index + 10]])
+ 
             # If some of the input is padded, then the attention mask is needed
             attention_mask = (inputs != tokenizer.pad_token_id)         # word_tokens --> 1, pad_token --> 0
             if attention_mask.all():
@@ -343,7 +405,27 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                 attention_mask=attention_mask,
                 masked_lm_labels=labels,
                 current_step=global_step) if args.mlm else model(inputs, labels=labels, current_step=global_step)
+            
             loss = outputs['loss']  # model outputs are always tuple in transformers (see doc)
+            
+            if args.track_dynamics:
+
+                logits = outputs['logits']
+                softmax_logits = torch.softmax(logits, dim=-1)  
+
+                labels_adjusted = labels.clone()
+                labels_adjusted[labels == -100] = 0 
+
+                valid_labels_mask = labels != -100
+                correct_token_probs = torch.gather(softmax_logits, dim=-1, index=labels_adjusted.unsqueeze(-1))
+                prob_sum = torch.sum(correct_token_probs.squeeze(-1) * valid_labels_mask, dim=-1)
+
+                summed_confidence[insert_idx : insert_idx + args.train_batch_size] = prob_sum.detach().cpu().numpy()
+                token_masks[insert_idx : insert_idx + args.train_batch_size, :] = token_mask
+
+            # Predicted token
+            #_, max_indices = torch.max(softmax_logits, dim=-1)
+            #predicted_token = max_indices * valid_labels_mask
 
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
@@ -356,18 +438,30 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
             tr_loss += loss.item()
             tr_lm_loss += outputs['lm_loss'].item()
+
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 if args.max_grad_norm > 0.:
                     if args.fp16:
                         total_norm = torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
                     else:
                         total_norm =torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+
                 optimizer.step()
-                scheduler.step()  # Update learning rate schedule
+                scheduler.step() 
                 model.zero_grad()
                 global_step += 1
 
                 if args.gpu == 0 and args.logging_steps > 0 and global_step % args.logging_steps == 0:
+                    
+                    if args.track_dynamics:
+                        instance_idx = (global_step - args.logging_steps) * args.train_batch_size
+                        print()
+                        print("Step: ", global_step, step)
+                        print("Calculated: ", instance_idx, global_step * args.train_batch_size)
+                        print()
+                        add_masks_batch(args.dynamics_path, instance_list[instance_idx: global_step * args.train_batch_size], token_masks)
+                        add_probs_batch(args.dynamics_path, instance_list[instance_idx: global_step * args.train_batch_size], summed_confidence, 0)
+
                     t_elapse = time.time() - t_start
 
                     # Log metrics
@@ -408,7 +502,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                     ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
                     os.makedirs(ckpt_dir, exist_ok=True)
                     save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler)
-
+            
             if args.max_steps > 0 and global_step >= args.max_steps:
                 break
 
@@ -445,6 +539,56 @@ def save_model(args, ckpt_dir, name, model, tokenizer, optimizer, scheduler):
     logger.info("Saving optimizer and scheduler states to %s", output_dir)
 
 
+def evaluate_train(args, train_dataset, instance_list, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix="") -> Dict:
+    # Loop to handle MNLI double evaluation (matched, mis-matched)
+    eval_dataset = load_and_cache_examples(args, tokenizer, evaluate=True)
+
+    args.eval_batch_size = args.per_gpu_eval_batch_size
+    # Note that DistributedSampler samples randomly
+
+    def collate(examples: List[torch.Tensor]):
+        if tokenizer._pad_token is None:
+            return pad_sequence(examples, batch_first=True)
+        return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)
+
+    train_sampler = CustomSampler(instance_list)
+    train_dataloader = DataLoader(
+        train_dataset, sampler=train_sampler, shuffle=False, num_workers=0,
+        batch_size=args.train_batch_size, collate_fn=collate, pin_memory=True
+    )
+
+
+    # Eval!
+    logger.info("***** Running evaluation {} *****".format(prefix))
+    logger.info("  Num examples = %d", len(eval_dataset))
+    logger.info("  Batch size = %d", args.eval_batch_size)
+    eval_loss = 0.0
+    nb_eval_steps = 0
+    model.eval()
+
+    for batch in tqdm(train_dataloader, desc="Evaluating"):
+        inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
+        inputs = inputs.to(args.device)
+        labels = labels.to(args.device)
+        # If some of the input is padded, then the attention mask is needed
+        attention_mask = (inputs != tokenizer.pad_token_id)  # word_tokens --> 1, pad_token --> 0
+        if attention_mask.all():
+            attention_mask = None
+
+        with torch.no_grad():
+            outputs = model(inputs, attention_mask=attention_mask, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
+            lm_loss = outputs['lm_loss']
+            eval_loss += lm_loss.mean().item()
+        nb_eval_steps += 1
+
+    eval_loss = eval_loss / nb_eval_steps
+    perplexity = torch.exp(torch.tensor(eval_loss)).item()
+
+    result = {"perplexity": perplexity}
+
+    return result
+
+
 def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix="") -> Dict:
     # Loop to handle MNLI double evaluation (matched, mis-matched)
     eval_dataset = load_and_cache_examples(args, tokenizer, evaluate=True)
@@ -471,7 +615,7 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
     model.eval()
 
     for batch in tqdm(eval_dataloader, desc="Evaluating"):
-        inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
+        inputs, labels, _ = mask_tokens(batch, tokenizer, args)
         inputs = inputs.to(args.device)
         labels = labels.to(args.device)
         # If some of the input is padded, then the attention mask is needed
@@ -634,7 +778,7 @@ def setup(gpu, args):
     if gpu == 0:
         torch.distributed.barrier()
 
-    logger.info("Training/evaluation parameters %s", args)
+    #logger.info("Training/evaluation parameters %s", args)
 
     # Training
     if args.do_train:

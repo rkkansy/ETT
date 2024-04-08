@@ -43,7 +43,7 @@ echo "Downloaded $WIKI_DUMP_NAME in $WIKI_PATH/bz2/$WIKI_DUMP_NAME"
 echo "*** Cleaning and tokenizing $lg Wikipedia dump ... ***"
 #python -m $TOOLS_PATH/wikiextractor/wikiextractor/WikiExtractor $WIKI_PATH/bz2/$WIKI_DUMP_NAME --processes 24 -q -o - \
 if [ ! -f $WIKI_PATH/txt/$lg.all.raw ]; then
-  python $TOOLS_PATH/wikiextractor/WikiExtractor.py $WIKI_PATH/bz2/$WIKI_DUMP_NAME --processes 24 -q -o - \
+  python $TOOLS_PATH/wikiextractor/WikiExtractor.py --processes 24 -q -o - $WIKI_PATH/bz2/$WIKI_DUMP_NAME\
   | sed "/^\s*\$/d" \
   | grep -v "^<doc id=" \
   | grep -v "</doc>\$" \

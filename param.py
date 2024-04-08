@@ -81,7 +81,7 @@ def process_args():
     parser.add_argument("--tune_width", action='store_true', default=False)
     parser.add_argument(
         "--fuse_init_scheme", nargs='*', default=['rand'], type=str,
-        choices=['rand', 'rand_softmax', 'stackbert', 'stackbert_noisy', 'sel', 'sel_noisy']
+        choices=['rand', 'rand_softmax', 'stackbert', 'stackbert_noisy', 'sel', 'sel_noisy'],
         help="Initialization of LiGO operator."
     )
     parser.add_argument(
@@ -144,6 +144,10 @@ def process_args():
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     parser.add_argument("--nodes", type=int, default=1)
     parser.add_argument("--nr", type=int, default=0)
+
+    # Training Dynamics
+    parser.add_argument("--track_dynamics", action="store_true", help="Whether to track the training dynamics.")
+    parser.add_argument("--dynamics_path", default="data/dynamics/", type=str, help="Path to save the dynamics data.")
 
     # Half Precision
     parser.add_argument(
