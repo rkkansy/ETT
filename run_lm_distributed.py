@@ -194,13 +194,16 @@ def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args, get_
     # 10% of the time, we replace masked input tokens with random word
     indices_random = torch.bernoulli(torch.full(labels.shape, 0.5)).bool() & masked_indices & ~indices_replaced
     random_words = torch.randint(len(tokenizer), labels.shape, dtype=torch.long)
-    inputs[indices_random] = random_words[indices_random]
+    rand_words = random_words[indices_random]
 
+    inputs[indices_random] = rand_words
+    
     if get_mask:
         operation_mask[indices_replaced] = 1  # Masked tokens marked as 1
         operation_mask[indices_random] = 2  # Randomized tokens marked as 2
         indices_kept = masked_indices & ~indices_replaced & ~indices_random
         operation_mask[indices_kept] = 3
+
 
     # The rest of the time (10% of the time) we keep the masked input tokens unchanged
     return inputs, labels, operation_mask
@@ -215,13 +218,15 @@ def decode_tokens_with_mask(tokenizer, inputs, masked_indices):
     return tokenizer.convert_tokens_to_string(tokens)
 
     
-def initialize_hdf5_file(filename, instance_list, max_position_embeddings, probs_length=10):
+def initialize_hdf5_file(filename, instance_list, max_position_embeddings, eval_iterations):
 
+    # Eval iteration + 1 for initial training dynamics. 
     with h5py.File(filename, 'w') as f:
-
-        f.create_dataset("masks", shape=(len(instance_list), max_position_embeddings), dtype=np.int8)
-        f.create_dataset("summed_probs", shape=(len(instance_list), probs_length), dtype=np.float32)
         f.create_dataset("instance_order", data=np.array(instance_list, dtype=np.int32))
+        f.create_dataset("masks", shape=(len(instance_list), max_position_embeddings), dtype=np.int8)
+        f.create_dataset("mean_confidence", shape=(len(instance_list), eval_iterations + 1), dtype=np.float32)
+        f.create_dataset("geom_mean_confidence", shape=(len(instance_list), eval_iterations + 1), dtype=np.float32)
+        f.create_dataset("correctness", shape=(len(instance_list), eval_iterations + 1), dtype=np.float32)
 
 def add_masks_batch(filename, instance_indices, masks):
 
@@ -229,19 +234,19 @@ def add_masks_batch(filename, instance_indices, masks):
         for i, idx in enumerate(instance_indices):
             f["masks"][idx] = masks[i]
 
-def add_probs_batch(filename, instance_indices, probs, epoch):
+def add_probs_batch(filename, instance_indices, correctness, mean_probs, geom_mean_probs, eval_epoch=0):
 
-    print(len(instance_indices))
-    print(len(probs))
     with h5py.File(filename, 'a') as f: 
         for i, idx in enumerate(instance_indices):
-            if probs[i] != 0:
-                print(i)
-            f["summed_probs"][idx, epoch] = probs[i]
+            f["correctness"][idx, eval_epoch] = correctness[i]
+            f["mean_confidence"][idx, eval_epoch] = mean_probs[i]
+            f["geom_mean_confidence"][idx, eval_epoch] = geom_mean_probs[i]
+            
 
 def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> Tuple[int, float]:
     set_seed(args)  # Added here for reproducibility
     info = False
+
     """ Train the model """
     if args.gpu == 0:
         current_time = datetime.now().strftime('%b%d_%H-%M-%S')
@@ -321,7 +326,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         model = DDP(model)
     else:
         model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[args.gpu], find_unused_parameters=True
+            model, device_ids=[args.gpu], find_unused_parameters=False
         )
 
     # Train!
@@ -356,10 +361,14 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             logger.info("  Do not load model from %s, restart training" % args.model_name_or_path)
 
     model.zero_grad()
-    start_index=global_step * args.train_batch_size
+
+    dynamics_eval_step = np.floor((args.max_steps - args.warmup_steps) / (args.dynamics_eval_runs + 1))
+    dynamics_eval_run = 0
+    start_index = global_step * args.train_batch_size
+
+    print("Dynamics eval step: ", dynamics_eval_step)
 
     train_sampler = CustomSampler(instance_list, start_index)
-    #instance_list = instance_list[start_index:] + instance_list[:start_index]
 
     train_dataloader = DataLoader(
         train_dataset, sampler=train_sampler, shuffle=False, num_workers=0,
@@ -374,11 +383,13 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
     if args.track_dynamics:
         token_masks = np.zeros((args.logging_steps * args.train_batch_size, args.block_size + 2), dtype=np.int8) 
-        summed_confidence = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
-        initialize_hdf5_file(args.dynamics_path, instance_list, args.block_size + 2)
+        initialize_hdf5_file(args.dynamics_path, instance_list, args.block_size + 2, args.dynamics_eval_runs)
 
     while True:
-        epoch_iterator = tqdm(train_dataloader, desc=f"Epoch: {epochs_trained:03d}", disable=args.gpu != 0)
+        epoch_iterator = tqdm(train_dataloader, 
+                              desc=f"Epoch: {epochs_trained:03d}", 
+                              disable=args.gpu != 0,
+                              ncols=100)
         tr_loss, tr_lm_loss = 0.0, 0.0
         t_start = time.time()
         model.zero_grad()       # Support of accumulating gradients
@@ -390,10 +401,6 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             inputs, labels, token_mask = mask_tokens(batch, tokenizer, args, get_mask=True)
             inputs = inputs.to(args.device)
             labels = labels.to(args.device)
-
-            if step == 0:
-                print(inputs[10])
-                print(train_dataset[instance_list[start_index + 10]])
  
             # If some of the input is padded, then the attention mask is needed
             attention_mask = (inputs != tokenizer.pad_token_id)         # word_tokens --> 1, pad_token --> 0
@@ -409,23 +416,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             loss = outputs['loss']  # model outputs are always tuple in transformers (see doc)
             
             if args.track_dynamics:
-
-                logits = outputs['logits']
-                softmax_logits = torch.softmax(logits, dim=-1)  
-
-                labels_adjusted = labels.clone()
-                labels_adjusted[labels == -100] = 0 
-
-                valid_labels_mask = labels != -100
-                correct_token_probs = torch.gather(softmax_logits, dim=-1, index=labels_adjusted.unsqueeze(-1))
-                prob_sum = torch.sum(correct_token_probs.squeeze(-1) * valid_labels_mask, dim=-1)
-
-                summed_confidence[insert_idx : insert_idx + args.train_batch_size] = prob_sum.detach().cpu().numpy()
                 token_masks[insert_idx : insert_idx + args.train_batch_size, :] = token_mask
-
-            # Predicted token
-            #_, max_indices = torch.max(softmax_logits, dim=-1)
-            #predicted_token = max_indices * valid_labels_mask
 
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
@@ -455,12 +446,9 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                     
                     if args.track_dynamics:
                         instance_idx = (global_step - args.logging_steps) * args.train_batch_size
-                        print()
-                        print("Step: ", global_step, step)
-                        print("Calculated: ", instance_idx, global_step * args.train_batch_size)
-                        print()
-                        add_masks_batch(args.dynamics_path, instance_list[instance_idx: global_step * args.train_batch_size], token_masks)
-                        add_probs_batch(args.dynamics_path, instance_list[instance_idx: global_step * args.train_batch_size], summed_confidence, 0)
+                        add_masks_batch(args.dynamics_path, 
+                                        instance_list[instance_idx: global_step * args.train_batch_size], 
+                                        token_masks)
 
                     t_elapse = time.time() - t_start
 
@@ -495,8 +483,13 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                         print(f"train_step={global_step}, train_time={t_elapse}, lr={scheduler.get_lr()[0]}, train_loss={train_loss},"
                             f"train_ppl={train_ppl}, eval_ppl={eval_ppl}", file=f)
 
-                    t_start = time.time()
 
+                if (global_step - args.warmup_steps) % dynamics_eval_step == 0 and args.track_dynamics and global_step > args.warmup_steps + dynamics_eval_step:
+                    evaluate_train(args, train_dataset, instance_list, dynamics_eval_run, model.module, tokenizer, prefix="")
+                    dynamics_eval_run += 1
+                
+                t_start = time.time()
+                
                 if args.gpu == 0 and args.ckpt_steps > 0 and global_step % args.ckpt_steps == 0:
                     checkpoint_name = f"checkpoint-{global_step:08d}"
                     ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
@@ -521,28 +514,8 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         tb_writer.close()
 
 
-def save_model(args, ckpt_dir, name, model, tokenizer, optimizer, scheduler):
-    # Save model checkpoint
-    output_dir = os.path.join(ckpt_dir, name)
-    os.makedirs(output_dir, exist_ok=True)
-    model_to_save = (
-        model.module if hasattr(model, "module") else model
-    )  # Take care of distributed/parallel training
-    model_to_save.save_pretrained(output_dir)
-    tokenizer.save_pretrained(output_dir)
-
-    torch.save(args, os.path.join(output_dir, "training_args.bin"))
-    logger.info("Saving model checkpoint to %s", output_dir)
-
-    torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
-    torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
-    logger.info("Saving optimizer and scheduler states to %s", output_dir)
-
-
-def evaluate_train(args, train_dataset, instance_list, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix="") -> Dict:
+def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix=""):
     # Loop to handle MNLI double evaluation (matched, mis-matched)
-    eval_dataset = load_and_cache_examples(args, tokenizer, evaluate=True)
-
     args.eval_batch_size = args.per_gpu_eval_batch_size
     # Note that DistributedSampler samples randomly
 
@@ -551,23 +524,28 @@ def evaluate_train(args, train_dataset, instance_list, model: PreTrainedModel, t
             return pad_sequence(examples, batch_first=True)
         return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)
 
-    train_sampler = CustomSampler(instance_list)
+    train_sampler = CustomSampler(instance_list, start_index=0)
     train_dataloader = DataLoader(
         train_dataset, sampler=train_sampler, shuffle=False, num_workers=0,
         batch_size=args.train_batch_size, collate_fn=collate, pin_memory=True
     )
 
-
     # Eval!
     logger.info("***** Running evaluation {} *****".format(prefix))
-    logger.info("  Num examples = %d", len(eval_dataset))
+    logger.info("  Num examples = %d", len(train_dataset))
     logger.info("  Batch size = %d", args.eval_batch_size)
-    eval_loss = 0.0
-    nb_eval_steps = 0
     model.eval()
 
-    for batch in tqdm(train_dataloader, desc="Evaluating"):
-        inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
+    correctness = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
+    mean_confidence = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
+    geom_mean_confidence = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
+
+    for step, batch in enumerate(tqdm(train_dataloader, desc="Evaluating", ncols=100)):
+        
+        insert_idx = (step % args.logging_steps) * args.train_batch_size 
+        insert_idx_batch = insert_idx + args.train_batch_size
+        
+        inputs, labels, _ = mask_tokens(batch, tokenizer, args)
         inputs = inputs.to(args.device)
         labels = labels.to(args.device)
         # If some of the input is padded, then the attention mask is needed
@@ -577,16 +555,51 @@ def evaluate_train(args, train_dataset, instance_list, model: PreTrainedModel, t
 
         with torch.no_grad():
             outputs = model(inputs, attention_mask=attention_mask, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
-            lm_loss = outputs['lm_loss']
-            eval_loss += lm_loss.mean().item()
-        nb_eval_steps += 1
+            logits = outputs['logits']
+            softmax_logits = torch.softmax(logits, dim=-1)  
+            valid_labels_mask = labels != -100
+            valid_labels_mask_float = valid_labels_mask.float()
 
-    eval_loss = eval_loss / nb_eval_steps
-    perplexity = torch.exp(torch.tensor(eval_loss)).item()
+            # Calculate correctness per instance
+            predicted_token_ids = torch.argmax(logits, dim=-1)
+            correct_predictions_mask = (predicted_token_ids == labels) & valid_labels_mask
+            correct_predictions_per_instance = correct_predictions_mask.sum(dim=1).float()
+            total_considered_per_instance = valid_labels_mask_float.sum(dim=1)
+            # Avoid division by 0 in case no words are masked
+            total_considered_per_instance = total_considered_per_instance.masked_fill_(total_considered_per_instance == 0, 1.)
+            correctness_per_instance = correct_predictions_per_instance / total_considered_per_instance
+            
+            # Gather correct token prediction probabilities
+            labels_adjusted = labels.clone()
+            labels_adjusted[labels == -100] = 0 
+            correct_token_probs = torch.gather(softmax_logits, dim=-1, index=labels_adjusted.unsqueeze(-1))
 
-    result = {"perplexity": perplexity}
+            # Calculate mean confidence
+            sum_probs = torch.sum(correct_token_probs.squeeze(-1) * valid_labels_mask, dim=1)
+            mean_probs = sum_probs / total_considered_per_instance
 
-    return result
+            # Calculate geometric mean in log-space to mitigate underflow
+            log_probs = torch.log(correct_token_probs.squeeze(-1) + 1e-10)
+            sum_log_probs = torch.sum(log_probs * valid_labels_mask, dim=1)
+            geom_mean_log = sum_log_probs / total_considered_per_instance
+            geom_mean_probs = torch.exp(geom_mean_log)               
+
+            correctness[insert_idx : insert_idx_batch] = correctness_per_instance.detach().cpu().numpy()
+            mean_confidence[insert_idx : insert_idx_batch] = mean_probs.detach().cpu().numpy()
+            geom_mean_confidence[insert_idx : insert_idx_batch] = geom_mean_probs.detach().cpu().numpy()
+
+        if (step + 1) % args.logging_steps == 0 and step > 1:
+
+            instance_idx = (step + 1 - args.logging_steps) * args.train_batch_size
+            add_probs_batch(args.dynamics_path, 
+                            instance_list[instance_idx: (step + 1) * args.train_batch_size], 
+                            correctness,
+                            mean_confidence,
+                            geom_mean_confidence, 
+                            eval_run)
+            
+            if step + 1 >= args.max_steps:
+                break
 
 
 def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix="") -> Dict:
@@ -614,7 +627,7 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
     nb_eval_steps = 0
     model.eval()
 
-    for batch in tqdm(eval_dataloader, desc="Evaluating"):
+    for batch in tqdm(eval_dataloader, desc="Evaluating", ncols=50):
         inputs, labels, _ = mask_tokens(batch, tokenizer, args)
         inputs = inputs.to(args.device)
         labels = labels.to(args.device)
@@ -636,6 +649,22 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
 
     return result
 
+def save_model(args, ckpt_dir, name, model, tokenizer, optimizer, scheduler):
+    # Save model checkpoint
+    output_dir = os.path.join(ckpt_dir, name)
+    os.makedirs(output_dir, exist_ok=True)
+    model_to_save = (
+        model.module if hasattr(model, "module") else model
+    )  # Take care of distributed/parallel training
+    model_to_save.save_pretrained(output_dir)
+    tokenizer.save_pretrained(output_dir)
+
+    torch.save(args, os.path.join(output_dir, "training_args.bin"))
+    logger.info("Saving model checkpoint to %s", output_dir)
+
+    torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
+    torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+    logger.info("Saving optimizer and scheduler states to %s", output_dir)
 
 def is_port_in_use(port):
     import socket

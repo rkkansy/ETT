@@ -148,6 +148,7 @@ def process_args():
     # Training Dynamics
     parser.add_argument("--track_dynamics", action="store_true", help="Whether to track the training dynamics.")
     parser.add_argument("--dynamics_path", default="data/dynamics/", type=str, help="Path to save the dynamics data.")
+    parser.add_argument("--dynamics_eval_runs", default=1, type=int, help="How many times should the dataset be evaluated during training.")
 
     # Half Precision
     parser.add_argument(
