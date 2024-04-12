@@ -1,0 +1,8 @@
+torch
+torchvision
+transformers==4.21.0
+tensorboardX
+sklearn
+faiss-gpu>=1.6.3
+h5py>=2.10.0
+spacy
