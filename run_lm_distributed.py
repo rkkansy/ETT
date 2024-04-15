@@ -40,8 +40,7 @@ import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
 import torch.multiprocessing as mp
-from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampler
-from torch.utils.data.distributed import DistributedSampler
+from torch.utils.data import DataLoader, Dataset, SequentialSampler
 from tqdm import tqdm, trange
 from transformers import (
     WEIGHTS_NAME,
@@ -151,7 +150,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False):
     if args.col_data:
         return CoLDataset(file_path, args.tokenizer_name, tokenizer, args.block_size,
                           split_sent=args.split_sent,
-                          verbose=(args.gpu == 0))
+                          verbose=True)
     elif args.line_by_line:
         return LineByLineTextDataset(tokenizer, args, file_path=file_path, block_size=args.block_size)
     else:
@@ -220,13 +219,12 @@ def decode_tokens_with_mask(tokenizer, inputs, masked_indices):
     
 def initialize_hdf5_file(filename, instance_list, max_position_embeddings, eval_iterations):
 
-    # Eval iteration + 1 for initial training dynamics. 
     with h5py.File(filename, 'w') as f:
         f.create_dataset("instance_order", data=np.array(instance_list, dtype=np.int32))
         f.create_dataset("masks", shape=(len(instance_list), max_position_embeddings), dtype=np.int8)
-        f.create_dataset("mean_confidence", shape=(len(instance_list), eval_iterations + 1), dtype=np.float32)
-        f.create_dataset("geom_mean_confidence", shape=(len(instance_list), eval_iterations + 1), dtype=np.float32)
-        f.create_dataset("correctness", shape=(len(instance_list), eval_iterations + 1), dtype=np.float32)
+        f.create_dataset("mean_confidence", shape=(len(instance_list), eval_iterations), dtype=np.float32)
+        f.create_dataset("geom_mean_confidence", shape=(len(instance_list), eval_iterations), dtype=np.float32)
+        f.create_dataset("correctness", shape=(len(instance_list), eval_iterations), dtype=np.float32)
 
 def add_masks_batch(filename, instance_indices, masks):
 
@@ -248,9 +246,9 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     info = False
 
     """ Train the model """
-    if args.gpu == 0:
-        current_time = datetime.now().strftime('%b%d_%H-%M-%S')
-        tb_writer = SummaryWriter(args.output_dir + '/runs/' + current_time)
+
+    current_time = datetime.now().strftime('%b%d_%H-%M-%S')
+    tb_writer = SummaryWriter(args.output_dir + '/runs/' + current_time)
 
     args.train_batch_size = args.per_gpu_train_batch_size
 
@@ -258,13 +256,6 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         if tokenizer._pad_token is None:
             return pad_sequence(examples, batch_first=True)
         return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)
-
-    if args.shuffle:
-        logger.info(f"Shuffle the dataset in training,"
-                       f"GPU: {args.gpu},"
-                       f"Rank: {args.rank},"
-                       f"Total: {args.world_size}")
-
 
     t_total = args.max_steps
 
@@ -284,10 +275,11 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     if args.warmup_ratio > 0.:
         assert args.warmup_steps == 0
         args.warmup_steps = int(t_total * args.warmup_ratio)
-    if args.gpu == 0:
-        print("Optimized with lr %f, steps %d, warmup steps %d, and use beta, epsilon %0.8f." % (
-            args.learning_rate, t_total, args.warmup_steps, optimizer.defaults['eps']
-        ), optimizer.defaults['betas'])
+
+    print("Optimized with lr %f, steps %d, warmup steps %d, and use beta, epsilon %0.8f." % (
+        args.learning_rate, t_total, args.warmup_steps, optimizer.defaults['eps']), 
+        optimizer.defaults['betas'])
+    
     if args.scheduler_type == 'linear':
         scheduler = get_linear_schedule_with_warmup(
             optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total
@@ -306,67 +298,53 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         raise ValueError(f"Unknow lr scheduler: {args.scheduler_type}")
 
     # Check if saved optimizer or scheduler states exist
-    if (
-        args.model_name_or_path
-        and os.path.isfile(os.path.join(args.model_name_or_path, "optimizer.pt"))
-        and os.path.isfile(os.path.join(args.model_name_or_path, "scheduler.pt"))
-    ):
+    if (args.model_name_or_path and os.path.isfile(os.path.join(args.model_name_or_path, "optimizer.pt")) 
+                                and os.path.isfile(os.path.join(args.model_name_or_path, "scheduler.pt"))):
         # Load in optimizer and scheduler states
         optimizer.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "optimizer.pt"), map_location=torch.device('cpu')))
         scheduler.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "scheduler.pt"), map_location=torch.device('cpu')))
-
+    
     if args.fp16:
         try:
             from apex import amp
         except ImportError:
             raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
-        model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level,
-                                          verbosity=0)
-        from apex.parallel import DistributedDataParallel as DDP
-        model = DDP(model)
+        model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level, verbosity=0)
     else:
-        model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[args.gpu], find_unused_parameters=False
-        )
+        model = model.to(args.device)
 
     # Train!
     logger.info("***** Running training *****")
     if info:
         logger.info("  Num examples = %d", len(train_dataset))
-        logger.info("  Instantaneous batch size per GPU = %d", args.per_gpu_train_batch_size)
-        logger.info(
-            "  Total train batch size (w. distributed & accumulation) = %d",
-            args.train_batch_size
-            * args.gradient_accumulation_steps
-            * args.world_size
-        )
+        logger.info("  Batch size = %d", args.per_gpu_train_batch_size)
         logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
         logger.info("  Total optimization steps = %d", t_total)
         
     global_step = 0
-    epochs_trained = 0
-
-    instance_list = list(range(0, len(train_dataset)))
-    random.shuffle(instance_list)
-
     # Check if continuing training from a checkpoint
     if args.model_name_or_path and os.path.exists(args.model_name_or_path):
         try:
             # set global_step to gobal_step of last saved checkpoint from model path
             checkpoint_name = os.path.basename(args.model_name_or_path)
             global_step = int(checkpoint_name.split("-")[-1])
-            logger.info("  Continuing training from iter %d, epoch %d" % (global_step, epochs_trained))
+            logger.info("  Continuing training from iter %d" % (global_step))
 
         except ValueError:
             logger.info("  Do not load model from %s, restart training" % args.model_name_or_path)
 
     model.zero_grad()
 
-    dynamics_eval_step = np.floor((args.max_steps - args.warmup_steps) / (args.dynamics_eval_runs + 1))
+    #dynamics_eval_step = np.floor((args.max_steps - args.warmup_steps) / (args.dynamics_eval_runs + 1))
+
+    instance_list = list(range(0, len(train_dataset)))
+    random.shuffle(instance_list)
+
     dynamics_eval_run = 0
+    dynamics_eval_runs = (args.max_steps / args.ckpt_steps) - 1
     start_index = global_step * args.train_batch_size
 
-    print("Dynamics eval step: ", dynamics_eval_step)
+    #print("Dynamics eval step: ", dynamics_eval_step)
 
     train_sampler = CustomSampler(instance_list, start_index)
 
@@ -375,7 +353,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         batch_size=args.train_batch_size, collate_fn=collate, pin_memory=True
     )
     # IMPORTANT: save the initialization
-    if args.gpu == 0 and global_step == 0:
+    if global_step == 0:
         checkpoint_name = f"checkpoint-{global_step:08d}"
         ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
         os.makedirs(ckpt_dir, exist_ok=True)
@@ -383,12 +361,12 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
     if args.track_dynamics:
         token_masks = np.zeros((args.logging_steps * args.train_batch_size, args.block_size + 2), dtype=np.int8) 
-        initialize_hdf5_file(args.dynamics_path, instance_list, args.block_size + 2, args.dynamics_eval_runs)
+        initialize_hdf5_file(args.dynamics_path, instance_list, args.block_size + 2, dynamics_eval_runs)
+        print(dynamics_eval_runs)
 
     while True:
         epoch_iterator = tqdm(train_dataloader, 
-                              desc=f"Epoch: {epochs_trained:03d}", 
-                              disable=args.gpu != 0,
+                              desc=f"Steps trained: {global_step:06d}", 
                               ncols=100)
         tr_loss, tr_lm_loss = 0.0, 0.0
         t_start = time.time()
@@ -442,7 +420,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                 model.zero_grad()
                 global_step += 1
 
-                if args.gpu == 0 and args.logging_steps > 0 and global_step % args.logging_steps == 0:
+                if args.logging_steps > 0 and global_step % args.logging_steps == 0:
                     
                     if args.track_dynamics:
                         instance_idx = (global_step - args.logging_steps) * args.train_batch_size
@@ -472,7 +450,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
                     # also evaluate on valid set for ppl
                     logger.info(" Evaluation Results of step %d: " % global_step)
-                    results = evaluate(args, model.module, tokenizer)
+                    results = evaluate(args, model, tokenizer)
                     for key, value in results.items():
                         tb_writer.add_scalar("eval_{}".format(key), value, global_step)
                         logger.info("\t %s: %0.4f" % (key, value))
@@ -482,19 +460,18 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                         eval_ppl = results['perplexity']
                         print(f"train_step={global_step}, train_time={t_elapse}, lr={scheduler.get_lr()[0]}, train_loss={train_loss},"
                             f"train_ppl={train_ppl}, eval_ppl={eval_ppl}", file=f)
-
-
-                if (global_step - args.warmup_steps) % dynamics_eval_step == 0 and args.track_dynamics and global_step > args.warmup_steps + dynamics_eval_step:
-                    evaluate_train(args, train_dataset, instance_list, dynamics_eval_run, model.module, tokenizer, prefix="")
-                    dynamics_eval_run += 1
                 
                 t_start = time.time()
                 
-                if args.gpu == 0 and args.ckpt_steps > 0 and global_step % args.ckpt_steps == 0:
+                if args.ckpt_steps > 0 and global_step % args.ckpt_steps == 0:
                     checkpoint_name = f"checkpoint-{global_step:08d}"
                     ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
                     os.makedirs(ckpt_dir, exist_ok=True)
                     save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler)
+
+                    if global_step >= args.warmup_steps + args.ckpt_steps and args.track_dynamics:
+                        evaluate_train(args, train_dataset, instance_list, dynamics_eval_run, model, tokenizer, prefix="")
+                        dynamics_eval_run += 1
             
             if args.max_steps > 0 and global_step >= args.max_steps:
                 break
@@ -505,13 +482,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
         epochs_trained += 1
 
-    # consider during the last evaluation, the GPU 0 is still working while others have exited.
-    # when GPU 0 call torch.no_grad, it will wait for the response from other processes
-    # however, a deadlock will be caused if other processes just exit
-    # torch.distributed.barrier()
-
-    if args.gpu == 0:
-        tb_writer.close()
+    tb_writer.close()
 
 
 def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix=""):
@@ -540,11 +511,10 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
     mean_confidence = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
     geom_mean_confidence = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
 
+    eval_stream = torch.cuda.Stream(device=args.device)
+
     for step, batch in enumerate(tqdm(train_dataloader, desc="Evaluating", ncols=100)):
-        
-        insert_idx = (step % args.logging_steps) * args.train_batch_size 
-        insert_idx_batch = insert_idx + args.train_batch_size
-        
+    
         inputs, labels, _ = mask_tokens(batch, tokenizer, args)
         inputs = inputs.to(args.device)
         labels = labels.to(args.device)
@@ -552,10 +522,16 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
         attention_mask = (inputs != tokenizer.pad_token_id)  # word_tokens --> 1, pad_token --> 0
         if attention_mask.all():
             attention_mask = None
+        
+        torch.cuda.synchronize()
 
         with torch.no_grad():
             outputs = model(inputs, attention_mask=attention_mask, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
             logits = outputs['logits']
+            
+            #with torch.cuda.stream(eval_stream):
+            insert_idx = (step % args.logging_steps) * args.train_batch_size 
+            insert_idx_batch = insert_idx + args.train_batch_size
             softmax_logits = torch.softmax(logits, dim=-1)  
             valid_labels_mask = labels != -100
             valid_labels_mask_float = valid_labels_mask.float()
@@ -571,7 +547,7 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
             
             # Gather correct token prediction probabilities
             labels_adjusted = labels.clone()
-            labels_adjusted[labels == -100] = 0 
+            labels_adjusted[~valid_labels_mask] = 0 
             correct_token_probs = torch.gather(softmax_logits, dim=-1, index=labels_adjusted.unsqueeze(-1))
 
             # Calculate mean confidence
@@ -598,8 +574,19 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
                             geom_mean_confidence, 
                             eval_run)
             
-            if step + 1 >= args.max_steps:
-                break
+        if step + 1 >= args.max_steps:
+
+            if args.max_steps % args.logging_steps != 0:
+                amt_logging_steps = args.max_steps // args.logging_steps
+
+                instance_idx = amt_logging_steps * args.logging_steps * args.train_batch_size
+                add_probs_batch(args.dynamics_path, 
+                                instance_list[instance_idx: args.max_steps * args.train_batch_size], 
+                                correctness,
+                                mean_confidence,
+                                geom_mean_confidence, 
+                                eval_run)
+            break
 
 
 def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix="") -> Dict:
@@ -607,7 +594,6 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
     eval_dataset = load_and_cache_examples(args, tokenizer, evaluate=True)
 
     args.eval_batch_size = args.per_gpu_eval_batch_size
-    # Note that DistributedSampler samples randomly
 
     def collate(examples: List[torch.Tensor]):
         if tokenizer._pad_token is None:
@@ -627,7 +613,7 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
     nb_eval_steps = 0
     model.eval()
 
-    for batch in tqdm(eval_dataloader, desc="Evaluating", ncols=50):
+    for batch in tqdm(eval_dataloader, desc="Evaluating", ncols=100):
         inputs, labels, _ = mask_tokens(batch, tokenizer, args)
         inputs = inputs.to(args.device)
         labels = labels.to(args.device)
@@ -653,10 +639,7 @@ def save_model(args, ckpt_dir, name, model, tokenizer, optimizer, scheduler):
     # Save model checkpoint
     output_dir = os.path.join(ckpt_dir, name)
     os.makedirs(output_dir, exist_ok=True)
-    model_to_save = (
-        model.module if hasattr(model, "module") else model
-    )  # Take care of distributed/parallel training
-    model_to_save.save_pretrained(output_dir)
+    model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
 
     torch.save(args, os.path.join(output_dir, "training_args.bin"))
@@ -666,31 +649,20 @@ def save_model(args, ckpt_dir, name, model, tokenizer, optimizer, scheduler):
     torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
     logger.info("Saving optimizer and scheduler states to %s", output_dir)
 
-def is_port_in_use(port):
-    import socket
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(('localhost', port)) == 0
-
-
 def main():
     parser = process_args()
     args = parser.parse_args()
 
-    os.environ['MASTER_ADDR'] = '127.0.0.1'
-    port = 9595
-    while is_port_in_use(port):
-        port += 1
-    print("Use port", port)
-    os.environ['MASTER_PORT'] = str(port)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    args.device = device
 
-    # Using all available gpus for multi-processing distributed
-    args.gpus = torch.cuda.device_count()
-    print("Use gpus ", list(range(args.gpus)))
-    args.world_size = args.gpus * args.nodes
-    mp.spawn(setup, nprocs=args.gpus, args=(args,))
+    # Setup logging
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO
+    )
 
-
-def setup(gpu, args):
     if args.should_continue:
         ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
         checkpoint_names = []
@@ -703,39 +675,10 @@ def setup(gpu, args):
             logger.warning('No checkpoint detected: %s', ckpt_dir)
             args.model_name_or_path = None
 
-    # Setup CUDA, GPU & distributed training
-    torch.cuda.set_device(gpu)
-    device = torch.device("cuda", gpu)
-    args.gpu = gpu                                  # Local device id.
-    args.device = device                            # Local device object.
-    args.rank = args.nr * args.gpus + gpu           # The gpu id in the world.
-    torch.distributed.init_process_group(
-        backend="nccl",
-        init_method='env://',
-        world_size=args.world_size,
-        rank=args.rank
-    )
-
-    # Setup logging
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO if args.gpu == 0 else logging.WARN,
-    )
-    logger.warning(
-        "Process GPU: %s, num_of_total_GPUs: %s, distributed training: True, 16-bits training: %s",
-        args.gpu, args.gpus, args.fp16,
-    )
-
     # Set seed
     set_seed(args)
-
+    args.device = device  
     # Load pretrained model and token
-    # Barrier to make sure only the first process in distributed training
-    # download model & vocabizer
-    if gpu != 0:
-        torch.distributed.barrier()
-
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
 
     # Get Config
@@ -802,29 +745,14 @@ def setup(gpu, args):
         model = model_class(config=config, args=args)
 
     model.to(args.device)
-
-    # End of barrier to make sure only the first process waiting other processes
-    if gpu == 0:
-        torch.distributed.barrier()
-
-    #logger.info("Training/evaluation parameters %s", args)
-
     # Training
     if args.do_train:
-        # Barrier to make sure only the first process in distributed training process the dataset,
-        # and the others will use the cache
-        if gpu != 0:
-            torch.distributed.barrier()
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
-        if gpu == 0:
-            torch.distributed.barrier()
-
         train(args, train_dataset, model, tokenizer)
 
     # Evaluation
-    if args.do_eval and gpu == 0:
+    if args.do_eval:
         result = evaluate(args, model, tokenizer)
-
 
 if __name__ == "__main__":
     main()
