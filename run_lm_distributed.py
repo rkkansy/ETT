@@ -511,7 +511,7 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
     mean_confidence = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
     geom_mean_confidence = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
 
-    eval_stream = torch.cuda.Stream(device=args.device)
+    #eval_stream = torch.cuda.Stream(device=args.device)
 
     for step, batch in enumerate(tqdm(train_dataloader, desc="Evaluating", ncols=100)):
     
@@ -523,7 +523,7 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
         if attention_mask.all():
             attention_mask = None
         
-        torch.cuda.synchronize()
+        #torch.cuda.synchronize()
 
         with torch.no_grad():
             outputs = model(inputs, attention_mask=attention_mask, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
