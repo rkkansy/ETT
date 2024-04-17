@@ -418,7 +418,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                 optimizer.step()
                 scheduler.step() 
                 model.zero_grad()
-                global_step += 1
+                global_step += args.gradient_accumulation_steps
 
                 if args.logging_steps > 0 and global_step % args.logging_steps == 0:
                     
