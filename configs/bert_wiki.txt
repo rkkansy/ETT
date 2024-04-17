@@ -10,20 +10,20 @@ col_data = True
 split_sent = True
 shuffle = True
 mlm = True
-track_dynamics = True
+track_dynamics = False
 dynamics_path = data/dynamics/test.hdf5
 dynamics_eval_runs = 5
 
 
 per_gpu_train_batch_size = 64
 per_gpu_eval_batch_size = 64
-gradient_accumulation_steps = 1
+gradient_accumulation_steps = 50
 max_steps = 40000
 learning_rate = 2e-4
 weight_decay = 0.1
 warmup_steps = 10000
 
-logging_steps = 100
-ckpt_steps = 1000
+logging_steps = 1000
+ckpt_steps = 10000
 
 should_continue = True
