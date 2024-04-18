@@ -442,8 +442,8 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                                            "would not state the loss_scale in the log")
                     if args.max_grad_norm > 0.:  # Only clip the grad when it is valid
                         tb_writer.add_scalar("grad_norm", total_norm, global_step)
-                    train_loss = tr_loss / args.logging_steps
-                    train_ppl = torch.exp(torch.tensor(tr_lm_loss / args.logging_steps)).item()
+                    train_loss = tr_loss / (args.logging_steps / args.gradient_accumulation_steps)
+                    train_ppl = torch.exp(torch.tensor(tr_lm_loss / args.logging_step)).item()
                     tb_writer.add_scalar("loss", train_loss, global_step)
                     tb_writer.add_scalar("train_ppl", train_ppl, global_step)
                     tr_loss = tr_lm_loss = 0.
