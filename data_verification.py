@@ -128,20 +128,28 @@ def load_data_in_chunks(file_path, dataset_name, chunk_size=1024):
     
     return chunks
 
-def load_data_from_hdf5(file_path):
+def load_eval_data_from_hdf5(file_path):
                          
     data = {
-        "masks" :[],
         "mean_confidence" : [],
         "geom_mean_confidence" : [],
         "correctness" : [],
+    }
+    with h5py.File(file_path, 'r') as f:
+        data['mean_confidence'] = f['mean_confidence'][:]
+        data['geom_mean_confidence'] = f['geom_mean_confidence'][:]
+        data['correctness'] = f['correctness'][:]   
+    
+    return data
+
+def load_train_data_from_hdf5(file_path):
+                         
+    data = {
+        "masks" :[],
         "instance_order" : []
     }
     with h5py.File(file_path, 'r') as f:
         data['masks'] = f['masks'][:]
-        data['mean_confidence'] = f['mean_confidence'][:]
-        data['geom_mean_confidence'] = f['geom_mean_confidence'][:]
-        data['correctness'] = f['correctness'][:]   
         data['instance_order'] = f['instance_order'][:]
     
     return data
@@ -165,7 +173,7 @@ def epoch_variability(instance_order, vals, selected_epochs, instance_range):
     return variabilities
     
 
-def make_plot_epoch(instance_order, masks, correctness, mean_confidence, geom_mean_confidence, instance_range, selected_epochs):
+def make_plot_epoch(instance_order, correctness, mean_confidence, geom_mean_confidence, instance_range, selected_epochs):
 
     mean_confidences = epoch_mean(instance_order, mean_confidence, selected_epochs, instance_range)
     geom_mean_confidences = epoch_mean(instance_order, geom_mean_confidence, selected_epochs, instance_range)
@@ -206,19 +214,18 @@ def eval(args):
 
     args.train_batch_size = args.per_gpu_train_batch_size
         
-    data = load_data_from_hdf5("data/dynamics/bert-6L-25k-5e.hdf5")
+    data_eval = load_eval_data_from_hdf5(args.dynamics_path)
+    data_train = load_train_data_from_hdf5(args.dynamics_path)
 
-    print(data.keys())
-    masks = data['masks']
-    mean_confidence = data['mean_confidence']
-    geom_mean_confidence = data['geom_mean_confidence']
-    correctness = data['correctness']
-    instance_order = data['instance_order']
+    mean_confidence = data_eval['mean_confidence']
+    geom_mean_confidence = data_eval['geom_mean_confidence']
+    correctness = data_eval['correctness']
 
-    #epoch_mean(instance_order, mean_confidence, [1, 3, 4], [0, 10])
+    instance_order = data_train['instance_order']
+
     epochs = [1, 2, 3]
     selected_instances = [64000, 128000]
-    make_plot_epoch(instance_order, masks, correctness, mean_confidence, geom_mean_confidence, selected_instances, epochs)
+    make_plot_epoch(instance_order, correctness, mean_confidence, geom_mean_confidence, selected_instances, epochs)
     
 
 def main():
