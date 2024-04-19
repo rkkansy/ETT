@@ -759,7 +759,7 @@ def main():
         if len(checkpoint_names) > 0:
             checkpoint_names = sorted(checkpoint_names, key=lambda p: int(p.split('-')[-1]))
             for i, ckpt_name in enumerate(checkpoint_names):
-                if i > args.first_dynamics_ckpt:
+                if i >= args.first_dynamics_ckpt:
                     model_names.append(os.path.join(ckpt_dir, ckpt_name))
         else:
             logger.warning('No checkpoint detected: %s', ckpt_dir)
