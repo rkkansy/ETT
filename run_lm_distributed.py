@@ -738,10 +738,12 @@ def get_model_tokenizer(args, device):
 def main():
     parser = process_args()
     args = parser.parse_args()
+    set_seed(args)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    args.train_batch_size = args.per_gpu_train_batch_size
 
-    if args.compute_dynamics:
+    if True:
         # Setup logging
         logging.basicConfig(
             format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
@@ -793,14 +795,21 @@ def main():
         
         init = True
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
-        instance_list = range(0, args.max_steps * args.train_batch_size)
+        instance_list = list(range(0, len(train_dataset)))
+        random.shuffle(instance_list)
+        initialize_hdf5_file(os.path.join(args.dynamics_path, "train.hdf5"), instance_list, 128)
+
+        instance_list = list(range(0, args.max_steps * args.train_batch_size))
 
         for i in range(0, len(model_names)):
             if init:
-                initialize_hdf5_file_eval(args.dynamics_path, args.max_steps * args.train_batch_size,  len(model_names))
+                initialize_hdf5_file_eval(os.path.join(args.dynamics_path, "eval.hdf5"), args.max_steps * args.train_batch_size,  len(model_names))
+                args.dynamics_path = os.path.join(args.dynamics_path, "eval.hdf5")
                 init = False
 
             args.model_name_or_path = model_names[i]
+            print(f"Evaluating {args.model_name_or_path} for {args.max_steps} steps.")
+
             model = model_class.from_pretrained(
                 args.model_name_or_path,
                 from_tf=bool(".ckpt" in args.model_name_or_path),
@@ -808,6 +817,7 @@ def main():
                 cache_dir=args.cache_dir,
                 args=args
             )
+            model.to(args.device)
             evaluate_train(args, train_dataset, instance_list, i, model, tokenizer)
     else:
         model, tokenizer = get_model_tokenizer(args, device)
