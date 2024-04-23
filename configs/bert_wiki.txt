@@ -10,10 +10,10 @@ col_data = True
 split_sent = True
 shuffle = True
 mlm = True
-track_dynamics = False
-dynamics_path = data/dynamics/test.hdf5
-dynamics_eval_runs = 5
 
+track_dynamics = True
+compute_dynamics = True
+first_dynamics_ckpt = 0
 
 per_gpu_train_batch_size = 96
 per_gpu_eval_batch_size = 96
@@ -23,7 +23,7 @@ learning_rate = 2e-4
 weight_decay = 0.1
 warmup_steps = 10000
 
-logging_steps = 1536
-ckpt_steps = 7680
+logging_steps = 128
+ckpt_steps = 128
 
 should_continue = True
