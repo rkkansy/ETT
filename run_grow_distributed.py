@@ -69,7 +69,7 @@ except ImportError:
 from ligo import create_ligo_from_model
 
 from run_lm_distributed import TextDataset, LineByLineTextDataset, load_and_cache_examples, \
-    set_seed, mask_tokens, is_port_in_use
+    set_seed, mask_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +211,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         t_start = time.time()
         model.zero_grad()       # Support of accumulating gradients
         for step, batch in enumerate(epoch_iterator):
-            inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
+            inputs, labels, _ = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
             inputs = inputs.to(args.device)
             labels = labels.to(args.device)
             # If some of the input is padded, then the attention mask is needed
@@ -333,7 +333,7 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
     model.eval()
 
     for batch in tqdm(eval_dataloader, desc="Evaluating"):
-        inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
+        inputs, labels, _ = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
         inputs = inputs.to(args.device)
         labels = labels.to(args.device)
         # If some of the input is padded, then the attention mask is needed
@@ -379,8 +379,6 @@ def main():
 
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     port = 9595
-    while is_port_in_use(port):
-        port += 1
     print("Use port", port)
     os.environ['MASTER_PORT'] = str(port)
 
