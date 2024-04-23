@@ -156,7 +156,7 @@ def load_train_data_from_hdf5(file_path):
 
 def epoch_mean(instance_order, vals, selected_epochs, instance_range):
 
-    instance_indices = np.array(instance_order)[instance_range[0]:instance_range[1]]
+    instance_indices = np.array(range(instance_range[0], instance_range[1]))
     epoch_indices = np.array(selected_epochs)
     selected_vals = vals[instance_indices[:, None], epoch_indices]
     means = np.mean(selected_vals, axis=1)
@@ -165,7 +165,7 @@ def epoch_mean(instance_order, vals, selected_epochs, instance_range):
 
 def epoch_variability(instance_order, vals, selected_epochs, instance_range):
 
-    instance_indices = np.array(instance_order)[instance_range[0]:instance_range[1]]
+    instance_indices = np.array(range(instance_range[0], instance_range[1]))
     epoch_indices = np.array(selected_epochs)
     selected_vals = vals[instance_indices[:, None], epoch_indices]
     variabilities = np.var(selected_vals, axis=1)
@@ -213,9 +213,9 @@ def eval(args):
     set_seed(args)  # Added here for reproducibility
 
     args.train_batch_size = args.per_gpu_train_batch_size
-        
-    data_eval = load_eval_data_from_hdf5(args.dynamics_path)
-    data_train = load_train_data_from_hdf5(args.dynamics_path)
+
+    data_eval = load_eval_data_from_hdf5(os.path.join(args.output_dir, "dynamics_eval.hdf5"))
+    data_train = load_train_data_from_hdf5(os.path.join(args.output_dir, "instances_masks.hdf5"))
 
     mean_confidence = data_eval['mean_confidence']
     geom_mean_confidence = data_eval['geom_mean_confidence']
@@ -223,8 +223,8 @@ def eval(args):
 
     instance_order = data_train['instance_order']
 
-    epochs = [1, 2, 3]
-    selected_instances = [64000, 128000]
+    epochs = [3, 4]
+    selected_instances = [0, 512*96]
     make_plot_epoch(instance_order, correctness, mean_confidence, geom_mean_confidence, selected_instances, epochs)
     
 
