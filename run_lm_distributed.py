@@ -215,6 +215,15 @@ def decode_tokens_with_mask(tokenizer, inputs, masked_indices):
             tokens[idx] = '[MASK]'
     return tokenizer.convert_tokens_to_string(tokens)
 
+def load_train_data_from_hdf5(file_path):
+                         
+    data = {
+        "instance_order" : []
+    }
+    with h5py.File(file_path, 'r') as f:
+        data['instance_order'] = f['instance_order'][:]
+    
+    return data
     
 def initialize_hdf5_file(filename, instance_list, max_position_embeddings):
 
@@ -222,11 +231,11 @@ def initialize_hdf5_file(filename, instance_list, max_position_embeddings):
         f.create_dataset("instance_order", data=np.array(instance_list, dtype=np.int32))
         f.create_dataset("masks", shape=(len(instance_list), max_position_embeddings), dtype=np.int8)
 
-def add_masks_batch(filename, instance_indices, masks):
+def add_masks_batch(filename, first_idx, masks):
 
     with h5py.File(filename, 'a') as f:
-        for i, idx in enumerate(instance_indices):
-            f["masks"][idx] = masks[i]
+        for i in range(len(masks)):
+            f["masks"][i + first_idx] = masks[i]
 
 def initialize_hdf5_file_eval(filename, data_size, eval_iterations):
 
@@ -235,13 +244,13 @@ def initialize_hdf5_file_eval(filename, data_size, eval_iterations):
         f.create_dataset("geom_mean_confidence", shape=(data_size, eval_iterations), dtype=np.float32)
         f.create_dataset("correctness", shape=(data_size, eval_iterations), dtype=np.float32)
 
-def add_probs_batch(filename, instance_indices, correctness, mean_probs, geom_mean_probs, eval_epoch=0):
+def add_probs_batch(filename, first_idx, correctness, mean_probs, geom_mean_probs, eval_epoch=0):
 
     with h5py.File(filename, 'a') as f: 
-        for i, idx in enumerate(instance_indices):
-            f["correctness"][idx, eval_epoch] = correctness[i]
-            f["mean_confidence"][idx, eval_epoch] = mean_probs[i]
-            f["geom_mean_confidence"][idx, eval_epoch] = geom_mean_probs[i]
+        for i in range(len(correctness)):
+            f["correctness"][i + first_idx, eval_epoch] = correctness[i]
+            f["mean_confidence"][i + first_idx, eval_epoch] = mean_probs[i]
+            f["geom_mean_confidence"][i + first_idx, eval_epoch] = geom_mean_probs[i]
             
 
 def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> Tuple[int, float]:
@@ -338,29 +347,40 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
     model.zero_grad()
 
-    #dynamics_eval_step = np.floor((args.max_steps - args.warmup_steps) / (args.dynamics_eval_runs + 1))
-
     if args.max_steps * args.train_batch_size > len(train_dataset):
         args.max_steps = len(train_dataset) // args.train_batch_size
 
-    instance_list = list(range(0, args.max_steps * args.train_batch_size))
-    random.shuffle(instance_list)
+    args.dynamics_path = os.path.join(args.output_dir, "instances_masks.hdf5")
+    # IMPORTANT: save the initialization
+    if global_step == 0:
+
+        checkpoint_name = f"checkpoint-{global_step:08d}"
+        ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
+        os.makedirs(ckpt_dir, exist_ok=True)
+        save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler)
+        if args.track_dynamics:
+            instance_list = list(range(0, len(train_dataset)))
+            random.shuffle(instance_list)
+            instance_list = instance_list[:args.max_steps * args.train_batch_size]
+            initialize_hdf5_file(args.dynamics_path, instance_list, args.block_size + 2)
+
+    if args.grow_scheme == None:
+        data = load_train_data_from_hdf5(args.dynamics_path)
+        instance_list = data['instance_order']
+
+    else: 
+        instance_list = list(range(0, args.max_steps * args.train_batch_size))
+
     start_index = global_step * args.train_batch_size
 
-    #print("Dynamics eval step: ", dynamics_eval_step)
+    instance_list = instance_list[start_index:]
 
-    train_sampler = CustomSampler(instance_list, start_index)
+    train_sampler = CustomSampler(instance_list)
 
     train_dataloader = DataLoader(
         train_dataset, sampler=train_sampler, shuffle=False, num_workers=0,
         batch_size=args.train_batch_size, collate_fn=collate, pin_memory=True
     )
-    # IMPORTANT: save the initialization
-    if global_step == 0:
-        checkpoint_name = f"checkpoint-{global_step:08d}"
-        ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
-        os.makedirs(ckpt_dir, exist_ok=True)
-        save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler)
 
     if args.track_dynamics:
         token_masks = np.zeros((args.logging_steps * args.train_batch_size, args.block_size + 2), dtype=np.int8) 
@@ -425,9 +445,9 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                 if args.logging_steps > 0 and global_step % args.logging_steps == 0:
                     
                     if args.track_dynamics:
-                        instance_idx = (global_step - args.logging_steps) * args.train_batch_size
+                        first_instance_idx = (global_step - args.logging_steps) * args.train_batch_size
                         add_masks_batch(args.dynamics_path, 
-                                        instance_list[instance_idx: global_step * args.train_batch_size], 
+                                        first_instance_idx, 
                                         token_masks)
 
                     t_elapse = time.time() - t_start
@@ -477,8 +497,6 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         if args.max_steps > 0 and global_step >= args.max_steps:
             epoch_iterator.close()
             break
-
-        epochs_trained += 1
 
     tb_writer.close()
 
@@ -560,9 +578,9 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
 
         if (step + 1) % args.logging_steps == 0 and step > 1:
 
-            instance_idx = (step + 1 - args.logging_steps) * args.train_batch_size
+            first_instance_idx = (step + 1 - args.logging_steps) * args.train_batch_size
             add_probs_batch(args.dynamics_path, 
-                            instance_list[instance_idx: (step + 1) * args.train_batch_size], 
+                            first_instance_idx, 
                             correctness,
                             mean_confidence,
                             geom_mean_confidence, 
@@ -581,7 +599,6 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
                                 geom_mean_confidence, 
                                 eval_run)
             break
-
 
 def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix="") -> Dict:
     # Loop to handle MNLI double evaluation (matched, mis-matched)
@@ -643,7 +660,7 @@ def save_model(args, ckpt_dir, name, model, tokenizer, optimizer, scheduler):
     torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
     logger.info("Saving optimizer and scheduler states to %s", output_dir)
 
-def get_model_tokenizer(args, device):
+def get_model_tokenizer(args):
         # Setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
@@ -665,7 +682,6 @@ def get_model_tokenizer(args, device):
 
     # Set seed
     set_seed(args)
-    args.device = device  
     # Load pretrained model and token
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
 
@@ -734,16 +750,15 @@ def get_model_tokenizer(args, device):
 
     return model, tokenizer
 
-
 def main():
     parser = process_args()
     args = parser.parse_args()
     set_seed(args)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     args.train_batch_size = args.per_gpu_train_batch_size
 
-    if True:
+    if args.compute_dynamics:
         # Setup logging
         logging.basicConfig(
             format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
@@ -751,9 +766,8 @@ def main():
             level=logging.INFO
         )
         config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
-        args.device = device
-
         ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
+
         checkpoint_names = []
         model_names = []
         if os.path.isdir(ckpt_dir):
@@ -793,19 +807,18 @@ def main():
                 "Why do you want the default config?? Please use --config_name or --model_name_or_path"
             )
         
-        init = True
+        
+        data = load_train_data_from_hdf5(os.path.join(args.output_dir, "instances_masks.hdf5"))
+        instance_list = data['instance_order']
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
-        instance_list = list(range(0, len(train_dataset)))
-        random.shuffle(instance_list)
-        initialize_hdf5_file(os.path.join(args.dynamics_path, "train.hdf5"), instance_list, 128)
 
-        instance_list = list(range(0, args.max_steps * args.train_batch_size))
+        args.max_steps = len(instance_list) // args.train_batch_size
 
         for i in range(0, len(model_names)):
-            if init:
-                initialize_hdf5_file_eval(os.path.join(args.dynamics_path, "eval.hdf5"), args.max_steps * args.train_batch_size,  len(model_names))
-                args.dynamics_path = os.path.join(args.dynamics_path, "eval.hdf5")
-                init = False
+            if i == 0:
+                args.dynamics_path = os.path.join(args.output_dir, "dynamics_eval.hdf5")
+                initialize_hdf5_file_eval(args.dynamics_path, args.max_steps * args.train_batch_size,  len(model_names))
+                
 
             args.model_name_or_path = model_names[i]
             print(f"Evaluating {args.model_name_or_path} for {args.max_steps} steps.")
@@ -820,8 +833,7 @@ def main():
             model.to(args.device)
             evaluate_train(args, train_dataset, instance_list, i, model, tokenizer)
     else:
-        model, tokenizer = get_model_tokenizer(args, device)
-
+        model, tokenizer = get_model_tokenizer(args)
         model.to(args.device)
         # Training
         if args.do_train:
