@@ -9,9 +9,9 @@ import tqdm
 from torch.utils.data import Sampler
 
 class CustomSampler(Sampler):
-    def __init__(self, indices, start_index=0):
+    def __init__(self, indices):
 
-        self.indices = indices[start_index:] + indices[:start_index]
+        self.indices = indices
     
     def __iter__(self):
         return iter(self.indices)
