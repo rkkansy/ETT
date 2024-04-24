@@ -255,7 +255,7 @@ def add_probs_batch(filename, first_idx, correctness, mean_probs, geom_mean_prob
 
 def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> Tuple[int, float]:
     set_seed(args)  # Added here for reproducibility
-    info = False
+    info = True
 
     """ Train the model """
 
@@ -281,7 +281,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
     ]
     optimizer = AdamW(optimizer_grouped_parameters,
-                      # betas=(0.9, 0.98),
+                      betas=(0.9, 0.98),
                       lr=args.learning_rate,
                       eps=args.adam_epsilon)
     if args.warmup_ratio > 0.:
@@ -369,9 +369,9 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         instance_list = data['instance_order']
 
     else: 
-        instance_list = list(range(0, args.max_steps * args.train_batch_size))
+        instance_list = list(range(0, args.max_steps * args.train_batch_size * args.gradient_accumulation_steps))
 
-    start_index = global_step * args.train_batch_size
+    start_index = global_step * args.train_batch_size * args.gradient_accumulation_steps
 
     instance_list = instance_list[start_index:]
 
@@ -383,7 +383,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     )
 
     if args.track_dynamics:
-        token_masks = np.zeros((args.logging_steps * args.train_batch_size, args.block_size + 2), dtype=np.int8) 
+        token_masks = np.zeros((args.logging_steps * args.train_batch_size * args.gradient_accumulation_steps, args.block_size + 2), dtype=np.int8) 
 
     while True:
         epoch_iterator = tqdm(train_dataloader, 
@@ -439,13 +439,13 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                 optimizer.step()
                 scheduler.step() 
                 model.zero_grad()
-                global_step += args.gradient_accumulation_steps
+                global_step += 1
                 
 
                 if args.logging_steps > 0 and global_step % args.logging_steps == 0:
                     
                     if args.track_dynamics:
-                        first_instance_idx = (global_step - args.logging_steps) * args.train_batch_size
+                        first_instance_idx = ((global_step * args.gradient_accumulation_steps) - args.logging_steps) * args.train_batch_size
                         add_masks_batch(args.dynamics_path, 
                                         first_instance_idx, 
                                         token_masks)
@@ -464,7 +464,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                                            "would not state the loss_scale in the log")
                     if args.max_grad_norm > 0.:  # Only clip the grad when it is valid
                         tb_writer.add_scalar("grad_norm", total_norm, global_step)
-                    train_loss = tr_loss / (args.logging_steps / args.gradient_accumulation_steps)
+                    train_loss = tr_loss / args.logging_steps
                     train_ppl = torch.exp(torch.tensor(tr_lm_loss / args.logging_steps)).item()
                     tb_writer.add_scalar("loss", train_loss, global_step)
                     tb_writer.add_scalar("train_ppl", train_ppl, global_step)
@@ -502,9 +502,8 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
 
 def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix=""):
-    # Loop to handle MNLI double evaluation (matched, mis-matched)
+    set_seed(args) 
     args.eval_batch_size = args.per_gpu_eval_batch_size
-    # Note that DistributedSampler samples randomly
 
     def collate(examples: List[torch.Tensor]):
         if tokenizer._pad_token is None:
@@ -587,17 +586,6 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
                             eval_run)
             
         if step + 1 >= args.max_steps:
-
-            if args.max_steps % args.logging_steps != 0:
-                amt_logging_steps = args.max_steps // args.logging_steps
-
-                instance_idx = amt_logging_steps * args.logging_steps * args.train_batch_size
-                add_probs_batch(args.dynamics_path, 
-                                instance_list[instance_idx: args.max_steps * args.train_batch_size], 
-                                correctness,
-                                mean_confidence,
-                                geom_mean_confidence, 
-                                eval_run)
             break
 
 def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix="") -> Dict:
