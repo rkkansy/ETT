@@ -347,8 +347,12 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
     model.zero_grad()
 
-    if args.max_steps * args.train_batch_size > len(train_dataset):
-        args.max_steps = len(train_dataset) // args.train_batch_size
+    instance_amount = args.max_steps * args.train_batch_size * args.gradient_accumulation_steps
+    batch_size = args.train_batch_size * args.gradient_accumulation_steps
+
+    if instance_amount > len(train_dataset):
+        args.max_steps = len(train_dataset) // batch_size
+        instance_amount = args.max_steps * args.train_batch_size * args.gradient_accumulation_steps
 
     args.dynamics_path = os.path.join(args.output_dir, "instances_masks.hdf5")
     # IMPORTANT: save the initialization
@@ -359,20 +363,21 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         os.makedirs(ckpt_dir, exist_ok=True)
         save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler)
         if args.track_dynamics:
+
             instance_list = list(range(0, len(train_dataset)))
             random.shuffle(instance_list)
-            instance_list = instance_list[:args.max_steps * args.train_batch_size]
+            instance_list = instance_list[:instance_amount]
             initialize_hdf5_file(args.dynamics_path, instance_list, args.block_size + 2)
 
-    if args.grow_scheme == None:
+    if args.grow_scheme == 'none':
         data = load_train_data_from_hdf5(args.dynamics_path)
         instance_list = data['instance_order']
 
     else: 
-        instance_list = list(range(0, args.max_steps * args.train_batch_size * args.gradient_accumulation_steps))
+        instance_list = list(range(0, instance_amount))
+        random.shuffle(instance_list)
 
-    start_index = global_step * args.train_batch_size * args.gradient_accumulation_steps
-
+    start_index = global_step * batch_size
     instance_list = instance_list[start_index:]
 
     train_sampler = CustomSampler(instance_list)
@@ -383,7 +388,8 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     )
 
     if args.track_dynamics:
-        token_masks = np.zeros((args.logging_steps * args.train_batch_size * args.gradient_accumulation_steps, args.block_size + 2), dtype=np.int8) 
+        token_masks = np.zeros((args.logging_steps * batch_size, args.block_size + 2), dtype=np.int8) 
+
 
     while True:
         epoch_iterator = tqdm(train_dataloader, 
@@ -395,7 +401,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         
         for step, batch in enumerate(epoch_iterator):
             
-            insert_idx = (step % args.logging_steps) * args.train_batch_size 
+            insert_idx = (step % (args.logging_steps * args.gradient_accumulation_steps)) * args.train_batch_size 
 
             inputs, labels, token_mask = mask_tokens(batch, tokenizer, args, get_mask=args.track_dynamics)
             inputs = inputs.to(args.device)
@@ -441,11 +447,10 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                 model.zero_grad()
                 global_step += 1
                 
-
                 if args.logging_steps > 0 and global_step % args.logging_steps == 0:
-                    
+
                     if args.track_dynamics:
-                        first_instance_idx = ((global_step * args.gradient_accumulation_steps) - args.logging_steps) * args.train_batch_size
+                        first_instance_idx = (global_step - args.logging_steps) * args.train_batch_size * args.gradient_accumulation_steps
                         add_masks_batch(args.dynamics_path, 
                                         first_instance_idx, 
                                         token_masks)
@@ -465,7 +470,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                     if args.max_grad_norm > 0.:  # Only clip the grad when it is valid
                         tb_writer.add_scalar("grad_norm", total_norm, global_step)
                     train_loss = tr_loss / args.logging_steps
-                    train_ppl = torch.exp(torch.tensor(tr_lm_loss / args.logging_steps)).item()
+                    train_ppl = torch.exp(torch.tensor(tr_lm_loss / (args.logging_steps * args.gradient_accumulation_steps))).item()
                     tb_writer.add_scalar("loss", train_loss, global_step)
                     tb_writer.add_scalar("train_ppl", train_ppl, global_step)
                     tr_loss = tr_lm_loss = 0.
@@ -503,8 +508,6 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
 def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix=""):
     set_seed(args) 
-    args.eval_batch_size = args.per_gpu_eval_batch_size
-
     def collate(examples: List[torch.Tensor]):
         if tokenizer._pad_token is None:
             return pad_sequence(examples, batch_first=True)
@@ -513,7 +516,7 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
     # Eval!
     logger.info("***** Running evaluation {} *****".format(prefix))
     logger.info("  Num examples = %d", len(train_dataset))
-    logger.info("  Batch size = %d", args.eval_batch_size)
+    logger.info("  Batch size = %d", args.train_batch_size)
     model.eval()
 
     train_sampler = CustomSampler(instance_list)
@@ -795,12 +798,12 @@ def main():
                 "Why do you want the default config?? Please use --config_name or --model_name_or_path"
             )
         
-        
         data = load_train_data_from_hdf5(os.path.join(args.output_dir, "instances_masks.hdf5"))
         instance_list = data['instance_order']
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
 
         args.max_steps = len(instance_list) // args.train_batch_size
+        args.logging_steps *= args.gradient_accumulation_steps
 
         for i in range(0, len(model_names)):
             if i == 0:
