@@ -223,9 +223,10 @@ def eval(args):
 
     instance_order = data_train['instance_order']
 
-    epochs = [3, 4]
-    selected_instances = [0, 512*96]
+    epochs = [1, 2, 3]
+    selected_instances = [98000, 98304]
     make_plot_epoch(instance_order, correctness, mean_confidence, geom_mean_confidence, selected_instances, epochs)
+
     
 
 def main():
