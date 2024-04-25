@@ -43,6 +43,8 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 import torch.multiprocessing as mp
 from torch.utils.data import DataLoader, Dataset, SequentialSampler
+from torch.optim.lr_scheduler import OneCycleLR
+
 from tqdm import tqdm, trange
 from transformers import (
     WEIGHTS_NAME,
@@ -309,6 +311,17 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total,
             power=args.scheduler_poly_power
         )
+    elif args.scheduler_type == 'one_cycle':
+        scheduler = OneCycleLR(
+            optimizer,
+            max_lr=0.001,
+            total_steps=t_total,
+            pct_start=0.5,
+            anneal_strategy='linear',
+            cycle_momentum=False, 
+            div_factor=25.0,    
+            final_div_factor=10000.0
+        )
     else:
         raise ValueError(f"Unknow lr scheduler: {args.scheduler_type}")
 
@@ -345,12 +358,12 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
     model.zero_grad()
 
-    instance_amount = args.max_steps * args.train_batch_size * args.gradient_accumulation_steps
     batch_size = args.train_batch_size * args.gradient_accumulation_steps
+    epoch_size = args.max_steps * batch_size
 
-    if instance_amount > len(train_dataset):
+    if epoch_size > len(train_dataset):
         args.max_steps = len(train_dataset) // batch_size
-        instance_amount = args.max_steps * args.train_batch_size * args.gradient_accumulation_steps
+        epoch_size = args.max_steps * args.train_batch_size * args.gradient_accumulation_steps
 
     args.dynamics_path = os.path.join(args.output_dir, "instances_masks.hdf5")
     # IMPORTANT: save the initialization
@@ -364,7 +377,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
             instance_list = list(range(0, len(train_dataset)))
             random.shuffle(instance_list)
-            instance_list = instance_list[:instance_amount]
+            instance_list = instance_list[:epoch_size]
             initialize_hdf5_file(args.dynamics_path, instance_list, args.block_size + 2)
 
     if args.grow_scheme == 'none':
@@ -372,7 +385,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         instance_list = data['instance_order']
 
     else: 
-        instance_list = list(range(0, instance_amount))
+        instance_list = list(range(0, epoch_size))
         random.shuffle(instance_list)
 
     start_index = global_step * batch_size
@@ -519,66 +532,68 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
     mean_confidence = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
     geom_mean_confidence = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
 
-    for step, batch in enumerate(tqdm(train_dataloader, desc="Evaluating", ncols=100)):
-    
-        inputs, labels, _ = mask_tokens(batch, tokenizer, args)
-        inputs = inputs.to(args.device)
-        labels = labels.to(args.device)
-        # If some of the input is padded, then the attention mask is needed
-        attention_mask = (inputs != tokenizer.pad_token_id)  # word_tokens --> 1, pad_token --> 0
-        if attention_mask.all():
-            attention_mask = None
+    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+        for step, batch in enumerate(tqdm(train_dataloader, desc="Evaluating", ncols=100)):
+        
+            inputs, labels, _ = mask_tokens(batch, tokenizer, args)
+            inputs = inputs.to(args.device)
+            labels = labels.to(args.device)
+            # If some of the input is padded, then the attention mask is needed
+            attention_mask = (inputs != tokenizer.pad_token_id)  # word_tokens --> 1, pad_token --> 0
+            if attention_mask.all():
+                attention_mask = None
 
-        with torch.no_grad():
-            outputs = model(inputs, attention_mask=attention_mask, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
-            logits = outputs['logits']
-            
-            insert_idx = (step % args.logging_steps) * args.train_batch_size 
-            insert_idx_batch = insert_idx + args.train_batch_size
-            softmax_logits = torch.softmax(logits, dim=-1)  
-            valid_labels_mask = labels != -100
-            valid_labels_mask_float = valid_labels_mask.float()
+            with torch.no_grad():
+                outputs = model(inputs, attention_mask=attention_mask, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
+                logits = outputs['logits']
+                
+                insert_idx = (step % args.logging_steps) * args.train_batch_size 
+                insert_idx_batch = insert_idx + args.train_batch_size
+                softmax_logits = torch.softmax(logits, dim=-1)  
+                valid_labels_mask = labels != -100
+                valid_labels_mask_float = valid_labels_mask.float()
 
-            # Calculate correctness per instance
-            predicted_token_ids = torch.argmax(logits, dim=-1)
-            correct_predictions_mask = (predicted_token_ids == labels) & valid_labels_mask
-            correct_predictions_per_instance = correct_predictions_mask.sum(dim=1).float()
-            total_considered_per_instance = valid_labels_mask_float.sum(dim=1)
-            # Avoid division by 0 in case no words are masked
-            total_considered_per_instance = total_considered_per_instance.masked_fill_(total_considered_per_instance == 0, 1.)
-            correctness_per_instance = correct_predictions_per_instance / total_considered_per_instance
-            
-            # Gather correct token prediction probabilities
-            labels_adjusted = labels.clone()
-            labels_adjusted[~valid_labels_mask] = 0 
-            correct_token_probs = torch.gather(softmax_logits, dim=-1, index=labels_adjusted.unsqueeze(-1))
+                # Calculate correctness per instance
+                predicted_token_ids = torch.argmax(logits, dim=-1)
+                correct_predictions_mask = (predicted_token_ids == labels) & valid_labels_mask
+                correct_predictions_per_instance = correct_predictions_mask.sum(dim=1).float()
+                total_considered_per_instance = valid_labels_mask_float.sum(dim=1)
 
-            # Calculate mean confidence
-            sum_probs = torch.sum(correct_token_probs.squeeze(-1) * valid_labels_mask, dim=1)
-            mean_probs = sum_probs / total_considered_per_instance
+                # Avoid division by 0 in case no words are masked
+                total_considered_per_instance = total_considered_per_instance.masked_fill_(total_considered_per_instance == 0, 1.)
+                correctness_per_instance = correct_predictions_per_instance / total_considered_per_instance
+                
+                # Gather correct token prediction probabilities
+                labels_adjusted = labels.clone()
+                labels_adjusted[~valid_labels_mask] = 0 
+                correct_token_probs = torch.gather(softmax_logits, dim=-1, index=labels_adjusted.unsqueeze(-1))
 
-            # Calculate geometric mean in log-space to mitigate underflow
-            log_probs = torch.log(correct_token_probs.squeeze(-1) + 1e-10)
-            sum_log_probs = torch.sum(log_probs * valid_labels_mask, dim=1)
-            geom_mean_log = sum_log_probs / total_considered_per_instance
-            geom_mean_probs = torch.exp(geom_mean_log)               
+                # Calculate mean confidence
+                sum_probs = torch.sum(correct_token_probs.squeeze(-1) * valid_labels_mask, dim=1)
+                mean_probs = sum_probs / total_considered_per_instance
 
-            correctness[insert_idx : insert_idx_batch] = correctness_per_instance.detach().cpu().numpy()
-            mean_confidence[insert_idx : insert_idx_batch] = mean_probs.detach().cpu().numpy()
-            geom_mean_confidence[insert_idx : insert_idx_batch] = geom_mean_probs.detach().cpu().numpy()
+                # Calculate geometric mean in log-space to mitigate underflow
+                log_probs = torch.log(correct_token_probs.squeeze(-1) + 1e-10)
+                sum_log_probs = torch.sum(log_probs * valid_labels_mask, dim=1)
+                geom_mean_log = sum_log_probs / total_considered_per_instance
+                geom_mean_probs = torch.exp(geom_mean_log)               
 
-        if (step + 1) % args.logging_steps == 0 and step > 1:
+                correctness[insert_idx : insert_idx_batch] = correctness_per_instance.detach().cpu().numpy()
+                mean_confidence[insert_idx : insert_idx_batch] = mean_probs.detach().cpu().numpy()
+                geom_mean_confidence[insert_idx : insert_idx_batch] = geom_mean_probs.detach().cpu().numpy()
 
-            first_instance_idx = (step + 1 - args.logging_steps) * args.train_batch_size
-            add_probs_batch(args.dynamics_path, 
-                            first_instance_idx, 
-                            correctness,
-                            mean_confidence,
-                            geom_mean_confidence, 
-                            eval_run)
-            
-        if step + 1 >= args.max_steps:
-            break
+            if (step + 1) % args.logging_steps == 0 and step > 1:
+
+                first_instance_idx = (step + 1 - args.logging_steps) * args.train_batch_size
+                add_probs_batch(args.dynamics_path, 
+                                first_instance_idx, 
+                                correctness,
+                                mean_confidence,
+                                geom_mean_confidence, 
+                                eval_run)
+                
+            if step + 1 >= args.max_steps:
+                break
 
 def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix="") -> Dict:
     # Loop to handle MNLI double evaluation (matched, mis-matched)
@@ -791,6 +806,10 @@ def main():
         data = load_train_data_from_hdf5(os.path.join(args.output_dir, "instances_masks.hdf5"))
         instance_list = data['instance_order']
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
+
+        #instance_list_comp = list(range(len(train_dataset)))
+        #random.shuffle(instance_list_comp)
+        #instance_list = instance_list_comp[:len(instance_list)]
 
         args.max_steps = len(instance_list) // args.train_batch_size
         args.logging_steps *= args.gradient_accumulation_steps
