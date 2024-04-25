@@ -35,6 +35,8 @@ from datetime import datetime
 import time 
 import threading
 import h5py
+from torch.cuda.amp import autocast, GradScaler
+
 
 import numpy as np
 import torch
@@ -280,6 +282,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         },
         {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
     ]
+
     optimizer = AdamW(optimizer_grouped_parameters,
                       betas=(0.9, 0.98),
                       lr=args.learning_rate,
@@ -309,22 +312,17 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     else:
         raise ValueError(f"Unknow lr scheduler: {args.scheduler_type}")
 
+    scaler = GradScaler()
+
     # Check if saved optimizer or scheduler states exist
     if (args.model_name_or_path and os.path.isfile(os.path.join(args.model_name_or_path, "optimizer.pt")) 
-                                and os.path.isfile(os.path.join(args.model_name_or_path, "scheduler.pt"))):
+                                and os.path.isfile(os.path.join(args.model_name_or_path, "scheduler.pt"))
+                                and os.path.isfile(os.path.join(args.model_name_or_path, "scaler.pt"))):
         # Load in optimizer and scheduler states
         optimizer.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "optimizer.pt"), map_location=torch.device('cpu')))
         scheduler.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "scheduler.pt"), map_location=torch.device('cpu')))
+        scaler.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "scaler.pt"), map_location=torch.device('cpu')))
     
-    if args.fp16:
-        try:
-            from apex import amp
-        except ImportError:
-            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
-        model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level, verbosity=0)
-    else:
-        model = model.to(args.device)
-
     # Train!
     logger.info("***** Running training *****")
     if info:
@@ -361,7 +359,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         checkpoint_name = f"checkpoint-{global_step:08d}"
         ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
         os.makedirs(ckpt_dir, exist_ok=True)
-        save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler)
+        save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler, scaler)
         if args.track_dynamics:
 
             instance_list = list(range(0, len(train_dataset)))
@@ -400,14 +398,13 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         model.zero_grad()       # Support of accumulating gradients
         
         for step, batch in enumerate(epoch_iterator):
-            
-            insert_idx = (step % (args.logging_steps * args.gradient_accumulation_steps)) * args.train_batch_size 
 
             inputs, labels, token_mask = mask_tokens(batch, tokenizer, args, get_mask=args.track_dynamics)
             inputs = inputs.to(args.device)
             labels = labels.to(args.device)
 
             if args.track_dynamics:
+                insert_idx = (step % (args.logging_steps * args.gradient_accumulation_steps)) * args.train_batch_size 
                 token_masks[insert_idx : insert_idx + args.train_batch_size, :] = token_mask
  
             # If some of the input is padded, then the attention mask is needed
@@ -416,35 +413,35 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                 attention_mask = None
 
             model.train()
-            outputs = model(inputs,
-                attention_mask=attention_mask,
-                masked_lm_labels=labels,
-                current_step=global_step) if args.mlm else model(inputs, labels=labels, current_step=global_step)
+            with autocast():
+                outputs = model(inputs,
+                    attention_mask=attention_mask,
+                    masked_lm_labels=labels,
+                    current_step=global_step)
             
-            loss = outputs['loss']  # model outputs are always tuple in transformers (see doc)
+                loss = outputs['loss']  # model outputs are always tuple in transformers (see doc)
 
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
 
-            if args.fp16:
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
-            else:
-                loss.backward()
+            scaler.scale(loss).backward()
 
             tr_loss += loss.item()
             tr_lm_loss += outputs['lm_loss'].item()
 
             if (step + 1) % args.gradient_accumulation_steps == 0:
-                if args.max_grad_norm > 0.:
-                    if args.fp16:
-                        total_norm = torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
-                    else:
-                        total_norm =torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
-                optimizer.step()
+                if args.max_grad_norm > 0.:
+                    scaler.unscale_(optimizer) 
+                    #for group in optimizer.param_groups:
+                    #    torch.nn.utils.clip_grad_norm_(group['params'], args.max_grad_norm)
+                    total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                    tb_writer.add_scalar("grad_norm", total_norm, global_step)
+
+                scaler.step(optimizer)
+                scaler.update()
                 scheduler.step() 
-                model.zero_grad()
+                optimizer.zero_grad()
                 global_step += 1
                 
                 if args.logging_steps > 0 and global_step % args.logging_steps == 0:
@@ -458,17 +455,9 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                     t_elapse = time.time() - t_start
 
                     # Log metrics
-                    tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
-                    if args.fp16:
-                        try:
-                            from apex.amp import _amp_state
-                            tb_writer.add_scalar("loss_scale", _amp_state.loss_scalers[0]._loss_scale, global_step)
-                            tb_writer.add_scalar("scaled_loss", scaled_loss.item(), global_step)
-                        except ImportError:
-                            logger.warning("Cannot import apex.amp._amp_state, "
-                                           "would not state the loss_scale in the log")
-                    if args.max_grad_norm > 0.:  # Only clip the grad when it is valid
-                        tb_writer.add_scalar("grad_norm", total_norm, global_step)
+                    tb_writer.add_scalar("lr", scheduler.get_last_lr()[0], global_step)
+                    tb_writer.add_scalar("loss_scale", scaler.get_scale(), global_step)
+
                     train_loss = tr_loss / args.logging_steps
                     train_ppl = torch.exp(torch.tensor(tr_lm_loss / (args.logging_steps * args.gradient_accumulation_steps))).item()
                     tb_writer.add_scalar("loss", train_loss, global_step)
@@ -485,8 +474,8 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                     output_log_file = os.path.join(args.output_dir, "train_log.txt")
                     with open(output_log_file, 'a') as f:
                         eval_ppl = results['perplexity']
-                        print(f"train_step={global_step}, train_time={t_elapse}, lr={scheduler.get_lr()[0]}, train_loss={train_loss},"
-                            f"train_ppl={train_ppl}, eval_ppl={eval_ppl}", file=f)
+                        print(f"train_step={global_step}, train_time={t_elapse}, lr={scheduler.get_last_lr()[0]}, train_loss={train_loss}, "
+                            f"scale={scaler.get_scale()}, grad_norm={total_norm}, train_ppl={train_ppl}, eval_ppl={eval_ppl}", file=f)
                 
                 t_start = time.time()
                 
@@ -494,7 +483,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                     checkpoint_name = f"checkpoint-{global_step:08d}"
                     ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
                     os.makedirs(ckpt_dir, exist_ok=True)
-                    save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler)
+                    save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler, scaler)
             
             if args.max_steps > 0 and global_step >= args.max_steps:
                 break
@@ -637,7 +626,7 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
 
     return result
 
-def save_model(args, ckpt_dir, name, model, tokenizer, optimizer, scheduler):
+def save_model(args, ckpt_dir, name, model, tokenizer, optimizer, scheduler, scaler):
     # Save model checkpoint
     output_dir = os.path.join(ckpt_dir, name)
     os.makedirs(output_dir, exist_ok=True)
@@ -649,6 +638,8 @@ def save_model(args, ckpt_dir, name, model, tokenizer, optimizer, scheduler):
 
     torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
     torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+    torch.save(scaler.state_dict(), os.path.join(output_dir, "scaler.pt"))
+
     logger.info("Saving optimizer and scheduler states to %s", output_dir)
 
 def get_model_tokenizer(args):
