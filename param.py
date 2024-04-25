@@ -136,7 +136,7 @@ def process_args():
     parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
 
     # Scheduler
-    parser.add_argument("--scheduler_type", default='linear', type=str, help="Type of lr scheduler.", choices=['linear', 'cosine', 'poly'])
+    parser.add_argument("--scheduler_type", default='linear', type=str, help="Type of lr scheduler.", choices=['linear', 'cosine', 'poly', 'one_cycle'])
     parser.add_argument("--scheduler_cosine_cycles", default=0.5, type=float, help="Number of cycles for cosine lr scheduler.")
     parser.add_argument("--scheduler_poly_power", default=1.0, type=float, help="Power of polynomial lr scheduler.")
 
