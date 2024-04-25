@@ -12,20 +12,23 @@ shuffle = True
 mlm = True
 
 fp16 = True
+scheduler_type = one_cycle
+max_grad_norm = 0.5
 
 track_dynamics = True
 compute_dynamics = False
-first_dynamics_ckpt = 1
+first_dynamics_ckpt = 4
 
 per_gpu_train_batch_size = 96
 per_gpu_eval_batch_size = 96
 gradient_accumulation_steps = 16
+
 max_steps = 40000
 learning_rate = 2e-4
 weight_decay = 0.1
 warmup_steps = 10000
 
-logging_steps = 64
-ckpt_steps = 320
+logging_steps = 8
+ckpt_steps = 16
 
 should_continue = True
