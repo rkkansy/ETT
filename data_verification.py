@@ -222,12 +222,12 @@ def eval(args):
     correctness = data_eval['correctness']
 
     instance_order = data_train['instance_order']
+    masks = data_train['masks']
 
-    epochs = [1, 2, 3]
-    selected_instances = [98000, 98304]
+    epochs = [5, 6, 7, 8]
+    selected_instances = [0, len(instance_order)]
+
     make_plot_epoch(instance_order, correctness, mean_confidence, geom_mean_confidence, selected_instances, epochs)
-
-    
 
 def main():
     parser = process_args()
