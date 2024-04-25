@@ -766,8 +766,7 @@ def main():
         if len(checkpoint_names) > 0:
             checkpoint_names = sorted(checkpoint_names, key=lambda p: int(p.split('-')[-1]))
             for i, ckpt_name in enumerate(checkpoint_names):
-                if i >= args.first_dynamics_ckpt:
-                    model_names.append(os.path.join(ckpt_dir, ckpt_name))
+                model_names.append(os.path.join(ckpt_dir, ckpt_name))
         else:
             logger.warning('No checkpoint detected: %s', ckpt_dir)
             return -1
@@ -804,25 +803,25 @@ def main():
 
         args.max_steps = len(instance_list) // args.train_batch_size
         args.logging_steps *= args.gradient_accumulation_steps
+        args.dynamics_path = os.path.join(args.output_dir, "dynamics_eval.hdf5")
 
+        if not os.path.isfile(args.dynamics_path):
+            initialize_hdf5_file_eval(args.dynamics_path, args.max_steps * args.train_batch_size,  len(model_names))
+        
         for i in range(0, len(model_names)):
-            if i == 0:
-                args.dynamics_path = os.path.join(args.output_dir, "dynamics_eval.hdf5")
-                initialize_hdf5_file_eval(args.dynamics_path, args.max_steps * args.train_batch_size,  len(model_names))
-                
+            if i >= args.first_dynamics_ckpt:
+                args.model_name_or_path = model_names[i]
+                print(f"Evaluating {args.model_name_or_path} for {args.max_steps} steps.")
 
-            args.model_name_or_path = model_names[i]
-            print(f"Evaluating {args.model_name_or_path} for {args.max_steps} steps.")
-
-            model = model_class.from_pretrained(
-                args.model_name_or_path,
-                from_tf=bool(".ckpt" in args.model_name_or_path),
-                config=config,
-                cache_dir=args.cache_dir,
-                args=args
-            )
-            model.to(args.device)
-            evaluate_train(args, train_dataset, instance_list, i, model, tokenizer)
+                model = model_class.from_pretrained(
+                    args.model_name_or_path,
+                    from_tf=bool(".ckpt" in args.model_name_or_path),
+                    config=config,
+                    cache_dir=args.cache_dir,
+                    args=args
+                )
+                model.to(args.device)
+                evaluate_train(args, train_dataset, instance_list, i, model, tokenizer)
     else:
         model, tokenizer = get_model_tokenizer(args)
         model.to(args.device)
