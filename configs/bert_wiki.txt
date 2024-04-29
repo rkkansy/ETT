@@ -14,10 +14,11 @@ mlm = True
 fp16 = True
 scheduler_type = one_cycle
 max_grad_norm = 0.5
+adam_epsilon = 0.000000000001
 
 track_dynamics = True
 compute_dynamics = False
-first_dynamics_ckpt = 6
+first_dynamics_ckpt = 8
 
 per_gpu_train_batch_size = 96
 per_gpu_eval_batch_size = 96
