@@ -248,13 +248,13 @@ def initialize_hdf5_file_eval(filename, data_size, eval_iterations):
         f.create_dataset("geom_mean_confidence", shape=(data_size, eval_iterations), dtype=np.float32)
         f.create_dataset("correctness", shape=(data_size, eval_iterations), dtype=np.float32)
 
-def add_probs_batch(filename, first_idx, correctness, mean_probs, geom_mean_probs, eval_epoch=0):
+def add_probs_batch(filename, offset, correctness, mean_probs, geom_mean_probs, eval_epoch=0):
 
     with h5py.File(filename, 'a') as f: 
         for i in range(len(correctness)):
-            f["correctness"][i + first_idx, eval_epoch] = correctness[i]
-            f["mean_confidence"][i + first_idx, eval_epoch] = mean_probs[i]
-            f["geom_mean_confidence"][i + first_idx, eval_epoch] = geom_mean_probs[i]
+            f["correctness"][i + offset, eval_epoch] = correctness[i]
+            f["mean_confidence"][i + offset, eval_epoch] = mean_probs[i]
+            f["geom_mean_confidence"][i + offset, eval_epoch] = geom_mean_probs[i]
             
 
 def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> Tuple[int, float]:
@@ -584,9 +584,10 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
 
             if (step + 1) % args.logging_steps == 0 and step > 1:
 
-                first_instance_idx = (step + 1 - args.logging_steps) * args.train_batch_size
+                offset = (step + 1 - args.logging_steps) * args.train_batch_size
+                print("Saving data")
                 add_probs_batch(args.dynamics_path, 
-                                first_instance_idx, 
+                                offset, 
                                 correctness,
                                 mean_confidence,
                                 geom_mean_confidence, 
@@ -807,6 +808,8 @@ def main():
         instance_list = data['instance_order']
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
 
+        #random.shuffle(instance_list)
+        #instance_list = instance_list[:96*32]
         #instance_list_comp = list(range(len(train_dataset)))
         #random.shuffle(instance_list_comp)
         #instance_list = instance_list_comp[:len(instance_list)]
