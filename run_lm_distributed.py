@@ -338,7 +338,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     logger.info("***** Running training *****")
     if info:
         logger.info("  Num examples = %d", len(train_dataset))
-        logger.info("  Batch size = %d", args.per_gpu_train_batch_size)
+        logger.info("  Batch size = %d", args.train_batch_size)
         logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
         logger.info("  Total optimization steps = %d", t_total)
         
@@ -598,8 +598,6 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
 def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix="") -> Dict:
     # Loop to handle MNLI double evaluation (matched, mis-matched)
     eval_dataset = load_and_cache_examples(args, tokenizer, evaluate=True)
-
-    args.eval_batch_size = args.per_gpu_eval_batch_size
 
     def collate(examples: List[torch.Tensor]):
         if tokenizer._pad_token is None:
