@@ -17,11 +17,11 @@ max_grad_norm = 0.5
 adam_epsilon = 0.000000000001
 
 track_dynamics = True
-compute_dynamics = False
-first_dynamics_ckpt = 8
+compute_dynamics = True
+first_dynamics_ckpt = 14
 
-per_gpu_train_batch_size = 96
-per_gpu_eval_batch_size = 96
+train_batch_size = 96
+eval_batch_size = 128
 gradient_accumulation_steps = 16
 
 max_steps = 40000
@@ -29,7 +29,7 @@ learning_rate = 0.00004
 weight_decay = 0.01 
 warmup_steps = 10000
 
-logging_steps = 16
-ckpt_steps = 64
+logging_steps = 64
+ckpt_steps = 512
 
 should_continue = True
