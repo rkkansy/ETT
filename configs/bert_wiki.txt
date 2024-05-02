@@ -17,8 +17,8 @@ max_grad_norm = 0.5
 adam_epsilon = 0.000000000001
 
 track_dynamics = True
-compute_dynamics = True
-first_dynamics_ckpt = 14
+compute_dynamics = False
+first_dynamics_ckpt = 10
 
 train_batch_size = 96
 eval_batch_size = 128
