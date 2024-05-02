@@ -256,6 +256,16 @@ def add_probs_batch(filename, offset, correctness, mean_probs, geom_mean_probs, 
             f["mean_confidence"][i + offset, eval_epoch] = mean_probs[i]
             f["geom_mean_confidence"][i + offset, eval_epoch] = geom_mean_probs[i]
             
+def async_add_probs_batch(filename, offset, correctness, mean_probs, geom_mean_probs, eval_epoch=0):
+
+    with h5py.File(filename, 'a') as f: 
+        for i in range(len(correctness)):
+            f["correctness"][i + offset, eval_epoch] = correctness[i]
+            f["mean_confidence"][i + offset, eval_epoch] = mean_probs[i]
+            f["geom_mean_confidence"][i + offset, eval_epoch] = geom_mean_probs[i]
+    
+    print(f"Finished saving data for step: {eval_epoch}: {offset}")
+       
 
 def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> Tuple[int, float]:
     set_seed(args)  # Added here for reproducibility
@@ -530,6 +540,8 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
     mean_confidence = np.zeros((args.logging_steps * args.eval_batch_size), dtype=np.float32)
     geom_mean_confidence = np.zeros((args.logging_steps * args.eval_batch_size), dtype=np.float32)
 
+    save_thread = None
+
     for step, batch in enumerate(tqdm(train_dataloader, desc="Evaluating", ncols=100)):
     
         inputs, labels, _ = mask_tokens(batch, tokenizer, args)
@@ -572,7 +584,7 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
             mean_probs = sum_probs / total_considered_per_instance
 
             # Calculate geometric mean in log-space to mitigate underflow
-            log_probs = torch.log(correct_token_probs.squeeze(-1) + 1e-10)
+            log_probs = torch.log(correct_token_probs.squeeze(-1) + 1e-7)
             sum_log_probs = torch.sum(log_probs * valid_labels_mask, dim=1)
             geom_mean_log = sum_log_probs / total_considered_per_instance
             geom_mean_probs = torch.exp(geom_mean_log)               
@@ -581,19 +593,26 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
             mean_confidence[insert_idx : insert_idx_batch] = mean_probs.detach().cpu().numpy()
             geom_mean_confidence[insert_idx : insert_idx_batch] = geom_mean_probs.detach().cpu().numpy()
 
-        if (step + 1) % args.logging_steps == 0 and step > 1:
+        if (step + 1) % args.logging_steps == 0 and step > 0:
+
+            if save_thread is not None:
+                save_thread.join()
 
             offset = (step + 1 - args.logging_steps) * args.eval_batch_size
-            print("Saving data")
-            add_probs_batch(args.dynamics_path, 
-                            offset, 
-                            correctness,
-                            mean_confidence,
-                            geom_mean_confidence, 
-                            eval_run)
             
+            correctness_copy = correctness.copy()
+            mean_confidence_copy = mean_confidence.copy()
+            geom_mean_confidence_copy = geom_mean_confidence.copy()
+
+            save_thread = threading.Thread(target=async_add_probs_batch, 
+                                           args=(args.dynamics_path, offset, correctness_copy, mean_confidence_copy, geom_mean_confidence_copy, eval_run))
+            save_thread.start()
+
         if step + 1 >= args.max_steps:
             break
+    
+    if save_thread is not None:
+        save_thread.join()
 
 def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix="") -> Dict:
     # Loop to handle MNLI double evaluation (matched, mis-matched)
@@ -805,7 +824,7 @@ def main():
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
 
         #random.shuffle(instance_list)
-        #instance_list = instance_list[:96*32]
+        #instance_list = instance_list[:128*128]
         #instance_list_comp = list(range(len(train_dataset)))
         #random.shuffle(instance_list_comp)
         #instance_list = instance_list_comp[:len(instance_list)]
