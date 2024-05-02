@@ -107,8 +107,8 @@ def process_args():
 
     # Batch Size and Training Steps
     parser.add_argument("--seed", type=int, default=95, help="random seed for initialization")
-    parser.add_argument("--per_gpu_train_batch_size", default=4, type=int, help="Batch size per GPU/CPU for training.")
-    parser.add_argument("--per_gpu_eval_batch_size", default=4, type=int, help="Batch size per GPU/CPU for evaluation.")
+    parser.add_argument("--train_batch_size", default=4, type=int, help="Batch for training.")
+    parser.add_argument("--eval_batch_size", default=4, type=int, help="Batch for evaluation.")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
         help="Number of updates steps to accumulate before performing a backward/update pass.",)
     parser.add_argument("--max_steps", default=100000, type=int,
