@@ -87,7 +87,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         current_time = datetime.now().strftime('%b%d_%H-%M-%S')
         tb_writer = SummaryWriter(args.output_dir + '/runs/' + current_time)
 
-    args.train_batch_size = args.per_gpu_train_batch_size
+    args.train_batch_size = args.train_batch_size
 
     def collate(examples: List[torch.Tensor]):
         if tokenizer._pad_token is None:
@@ -171,7 +171,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(train_dataset))
     # logger.info("  Num Epochs = %d", args.num_train_epochs)
-    logger.info("  Instantaneous batch size per GPU = %d", args.per_gpu_train_batch_size)
+    logger.info("  Instantaneous batch size per GPU = %d", args.train_batch_size)
     logger.info(
         "  Total train batch size (w. distributed & accumulation) = %d",
         args.train_batch_size
@@ -311,7 +311,7 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
     # Loop to handle MNLI double evaluation (matched, mis-matched)
     eval_dataset = load_and_cache_examples(args, tokenizer, evaluate=True)
 
-    args.eval_batch_size = args.per_gpu_eval_batch_size
+    args.eval_batch_size = args.eval_batch_size
     # Note that DistributedSampler samples randomly
 
     def collate(examples: List[torch.Tensor]):
