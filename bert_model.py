@@ -331,11 +331,6 @@ class BertSelfOutput(nn.Module):
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
 
-class BertSelfOutputPrenorm(nn.Module):
-    # This now becomes a simple pass-through module.
-    def forward(self, hidden_states):
-        return hidden_states
-
 class BertAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
