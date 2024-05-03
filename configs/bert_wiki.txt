@@ -11,7 +11,7 @@ split_sent = True
 shuffle = True
 mlm = True
 
-fp16 = True
+fp16 = False
 scheduler_type = one_cycle
 max_grad_norm = 0.5
 adam_epsilon = 0.000000000001
