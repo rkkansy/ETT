@@ -78,10 +78,6 @@ from ligo import initialize_model_with_ligo
 
 logger = logging.getLogger(__name__)
 
-train_dynamics_buffer0 = []
-train_dynamics_buffer1 = []
-current_buffer = 0
-
 MODEL_CLASSES = {
     "bert": (BertConfig, SimpleBertForMaskedLM, BertTokenizer),
     "roberta": (RobertaConfig, SimpleRobertaForMaskedLM, RobertaTokenizer),
@@ -824,7 +820,7 @@ def main():
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
 
         #random.shuffle(instance_list)
-        #instance_list = instance_list[:128*128]
+        instance_list = instance_list[:128*128]
         #instance_list_comp = list(range(len(train_dataset)))
         #random.shuffle(instance_list_comp)
         #instance_list = instance_list_comp[:len(instance_list)]
