@@ -518,8 +518,6 @@ def create_ligo_from_model(model_large, args, source_model=None):
         )
 
     #### Bert2Bert style coefficient tying
-
-    kwargs_depth_param = dict(learnable=args.tune_depth, init_scheme=args.fuse_init_scheme_depth, init_noise=args.fuse_init_noise_depth)
     kwargs_width_param = dict(learnable=args.tune_width, init_scheme=args.fuse_init_scheme_width, init_noise=args.fuse_init_noise_width)
 
     # Embedding module
@@ -567,6 +565,9 @@ def create_ligo_from_model(model_large, args, source_model=None):
         for name in ['query', 'key', 'value']:
             setattr(attn_large, name, create_lin_layer(getattr(attn_large, name), args, layer_index=i, width_in_tie=g_e, width_out_tie=getattr(l_large, f'fuse_width_{name}')))
 
+        # Attention pre-layer norm
+        setattr(l_large.attention, 'LayerNorm', create_ln_layer(l_large.attention.LayerNorm, args, layer_index=i, width_out_tie=g_e))
+        
         # MHA - W_o
         setattr(l_large.attention.output, 'dense', create_lin_layer(l_large.attention.output.dense, args, layer_index=i, width_in_tie=getattr(l_large, f'fuse_width_value'), width_out_tie=g_e))
 
@@ -579,8 +580,9 @@ def create_ligo_from_model(model_large, args, source_model=None):
         # FFN - Layer 2
         setattr(l_large.output, 'dense', create_lin_layer(l_large.output.dense, args, layer_index=i, width_in_tie=getattr(l_large, 'fuse_width_ffn'), width_out_tie=g_e))
 
-        # FFN LayerNorm
-        setattr(l_large.output, 'LayerNorm', create_ln_layer(l_large.output.LayerNorm, args, layer_index=i, width_out_tie=g_e))
+        # Final Layer Norm
+        setattr(l_large, 'LayerNorm', create_ln_layer(l_large.LayerNorm, args, layer_index=i, width_out_tie=g_e))
+
 
     # Classifier
     if is_bert(model_small) and is_bert(model_large):
@@ -624,6 +626,7 @@ def initialize_model_with_ligo(model_large, args):
     modules_coeff = {name:module for name, module in model_coeff.named_modules()}
     for name, module in model_large.named_modules():
         if isinstance(module, (nn.Linear, nn.LayerNorm)):
+            print(name, module)
             module.weight.copy_(modules_coeff[name].get_params()[0])
             if hasattr(module, 'bias'):
                 module.bias.copy_(modules_coeff[name].get_params()[1])
