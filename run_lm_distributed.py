@@ -590,7 +590,7 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
             geom_mean_confidence[insert_idx : insert_idx_batch] = geom_mean_probs.detach().cpu().numpy()
 
         if (step + 1) % args.logging_steps == 0 and step > 0:
-
+            
             if save_thread is not None:
                 save_thread.join()
 
@@ -820,7 +820,7 @@ def main():
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
 
         #random.shuffle(instance_list)
-        instance_list = instance_list[:128*128]
+        #instance_list = instance_list[:128*128]
         #instance_list_comp = list(range(len(train_dataset)))
         #random.shuffle(instance_list_comp)
         #instance_list = instance_list_comp[:len(instance_list)]
