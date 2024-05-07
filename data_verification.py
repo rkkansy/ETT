@@ -212,20 +212,20 @@ def make_plot_epoch(instance_order, correctness, mean_confidence, geom_mean_conf
 def eval(args):
     set_seed(args)  # Added here for reproducibility
 
-    args.train_batch_size = args.per_gpu_train_batch_size
-
     data_eval = load_eval_data_from_hdf5(os.path.join(args.output_dir, "dynamics_eval.hdf5"))
     data_train = load_train_data_from_hdf5(os.path.join(args.output_dir, "instances_masks.hdf5"))
 
+    # Extract relevant metrics from synchronous evaluation data
     mean_confidence = data_eval['mean_confidence']
     geom_mean_confidence = data_eval['geom_mean_confidence']
     correctness = data_eval['correctness']
 
+    # Extract training data indices and masks
     instance_order = data_train['instance_order']
     masks = data_train['masks']
-
-    epochs = [5, 6, 7, 8]
-    selected_instances = [0, len(instance_order)]
+    
+    epochs = [13, 14, 15]
+    selected_instances = [0, len(geom_mean_confidence)]
 
     make_plot_epoch(instance_order, correctness, mean_confidence, geom_mean_confidence, selected_instances, epochs)
 
