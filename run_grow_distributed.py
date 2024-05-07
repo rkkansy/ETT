@@ -33,7 +33,8 @@ import sys
 from typing import Dict, List, Tuple
 from datetime import datetime
 import time
-
+from torch.cuda.amp import autocast, GradScaler
+from data import CustomSampler
 import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -83,9 +84,9 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     set_seed(args)  # Added here for reproducibility
 
     """ Train the model """
-    if args.gpu == 0:
-        current_time = datetime.now().strftime('%b%d_%H-%M-%S')
-        tb_writer = SummaryWriter(args.output_dir + '/runs/' + current_time)
+
+    current_time = datetime.now().strftime('%b%d_%H-%M-%S')
+    tb_writer = SummaryWriter(args.output_dir + '/runs/' + current_time)
 
     args.train_batch_size = args.train_batch_size
 
@@ -94,17 +95,13 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             return pad_sequence(examples, batch_first=True)
         return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)
 
-    if args.shuffle:
-        logger.info(f"Shuffle the dataset in training,"
-                       f"GPU: {args.gpu},"
-                       f"Rank: {args.rank},"
-                       f"Total: {args.world_size}")
-    train_sampler = DistributedSampler(
-        train_dataset,
-        num_replicas=args.world_size,
-        rank=args.rank,
-        shuffle=args.shuffle,
-    )
+
+    epoch_size = args.train_batch_size * args.max_steps * args.gradient_accumulation_steps
+    instance_list = list(range(0, len(train_dataset)))
+    random.shuffle(instance_list)
+    instance_list = instance_list[:epoch_size]
+
+    train_sampler = CustomSampler(instance_list)
     train_dataloader = DataLoader(
         train_dataset, sampler=train_sampler, shuffle=False, num_workers=0,
         batch_size=args.train_batch_size, collate_fn=collate, pin_memory=True
@@ -135,48 +132,35 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     if args.warmup_ratio > 0.:
         assert args.warmup_steps == 0
         args.warmup_steps = int(t_total * args.warmup_ratio)
-    if args.gpu == 0:
-        print("Optimized with lr %f, steps %d, warmup steps %d, and use beta, epsilon %0.8f." % (
-            args.learning_rate, t_total, args.warmup_steps, optimizer.defaults['eps']
-        ), optimizer.defaults['betas'])
+
+    print("Optimized with lr %f, steps %d, warmup steps %d, and use beta, epsilon %0.8f." % (
+        args.learning_rate, t_total, args.warmup_steps, optimizer.defaults['eps']
+    ), optimizer.defaults['betas'])
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total
     )
 
     # Check if saved optimizer or scheduler states exist
-    if (
-        args.model_name_or_path
-        and os.path.isfile(os.path.join(args.model_name_or_path, "optimizer.pt"))
-        and os.path.isfile(os.path.join(args.model_name_or_path, "scheduler.pt"))
-    ):
-        # Load in optimizer and scheduler states
-        optimizer.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "optimizer.pt")))
-        scheduler.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "scheduler.pt")))
+    scaler = GradScaler()
 
-    if args.fp16:
-        try:
-            from apex import amp
-        except ImportError:
-            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
-        model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level,
-                                          verbosity=0)
-        from apex.parallel import DistributedDataParallel as DDP
-        model = DDP(model)
-    else:
-        model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[args.gpu], find_unused_parameters=True
-        )
+    # Check if saved optimizer or scheduler states exist
+    if (args.model_name_or_path and os.path.isfile(os.path.join(args.model_name_or_path, "optimizer.pt")) 
+                                and os.path.isfile(os.path.join(args.model_name_or_path, "scheduler.pt"))
+                                and os.path.isfile(os.path.join(args.model_name_or_path, "scaler.pt"))):
+        # Load in optimizer and scheduler states
+        optimizer.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "optimizer.pt"), map_location=torch.device('cpu')))
+        scheduler.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "scheduler.pt"), map_location=torch.device('cpu')))
+        scaler.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "scaler.pt"), map_location=torch.device('cpu')))
 
     # Train!
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(train_dataset))
     # logger.info("  Num Epochs = %d", args.num_train_epochs)
-    logger.info("  Instantaneous batch size per GPU = %d", args.train_batch_size)
+    logger.info("  Batch size  = %d", args.train_batch_size)
     logger.info(
-        "  Total train batch size (w. distributed & accumulation) = %d",
+        "  Total train batch size (w. accumulation) = %d",
         args.train_batch_size
         * args.gradient_accumulation_steps
-        * args.world_size
     )
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logger.info("  Total optimization steps = %d", t_total)
@@ -199,14 +183,14 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     model.zero_grad()
 
     # IMPORTANT: save the initialization
-    if args.gpu == 0 and global_step == 0:
+    if global_step == 0:
         checkpoint_name = f"checkpoint-{global_step:08d}"
         ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
         os.makedirs(ckpt_dir, exist_ok=True)
-        save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler)
+        save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler, scaler)
 
     while True:
-        epoch_iterator = tqdm(train_dataloader, desc=f"Epoch: {epochs_trained:03d}", disable=args.gpu != 0)
+        epoch_iterator = tqdm(train_dataloader, desc=f"Epoch: {epochs_trained:03d}")
         tr_loss, tr_lm_loss = 0.0, 0.0
         t_start = time.time()
         model.zero_grad()       # Support of accumulating gradients
@@ -220,58 +204,49 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                 attention_mask = None
 
             model.train()
-            outputs = model(inputs,
-                attention_mask=attention_mask,
-                masked_lm_labels=labels,
-                current_step=global_step) if args.mlm else model(inputs, labels=labels, current_step=global_step)
+            with autocast():
+                outputs = model(inputs,
+                    attention_mask=attention_mask,
+                    masked_lm_labels=labels,
+                    current_step=global_step) if args.mlm else model(inputs, labels=labels, current_step=global_step)
             loss = outputs['loss']  # model outputs are always tuple in transformers (see doc)
 
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
 
-            if args.fp16:
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
-            else:
-                loss.backward()
-
+            scaler.scale(loss).backward()
             tr_loss += loss.item()
             tr_lm_loss += outputs['lm_loss'].item()
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 if args.max_grad_norm > 0.:
-                    if args.fp16:
-                        total_norm = torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
-                    else:
-                        total_norm =torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                optimizer.step()
-                scheduler.step()  # Update learning rate schedule
-                model.zero_grad()
+                    scaler.unscale_(optimizer) 
+                    #for group in optimizer.param_groups:
+                    #    torch.nn.utils.clip_grad_norm_(group['params'], args.max_grad_norm)
+                    total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                    tb_writer.add_scalar("grad_norm", total_norm, global_step)
+
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step() 
+                optimizer.zero_grad()
                 global_step += 1
 
-                if args.gpu == 0 and args.logging_steps > 0 and global_step % args.logging_steps == 0:
+                if args.logging_steps > 0 and global_step % args.logging_steps == 0:
                     t_elapse = time.time() - t_start
 
                     # Log metrics
-                    tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
-                    if args.fp16:
-                        try:
-                            from apex.amp import _amp_state
-                            tb_writer.add_scalar("loss_scale", _amp_state.loss_scalers[0]._loss_scale, global_step)
-                            tb_writer.add_scalar("scaled_loss", scaled_loss.item(), global_step)
-                        except ImportError:
-                            logger.warning("Cannot import apex.amp._amp_state, "
-                                           "would not state the loss_scale in the log")
-                    if args.max_grad_norm > 0.:  # Only clip the grad when it is valid
-                        tb_writer.add_scalar("grad_norm", total_norm, global_step)
+                    tb_writer.add_scalar("lr", scheduler.get_last_lr()[0], global_step)
+                    tb_writer.add_scalar("loss_scale", scaler.get_scale(), global_step)
+
                     train_loss = tr_loss / args.logging_steps
-                    train_ppl = torch.exp(torch.tensor(tr_lm_loss / args.logging_steps)).item()
+                    train_ppl = torch.exp(torch.tensor(tr_lm_loss / (args.logging_steps * args.gradient_accumulation_steps))).item()
                     tb_writer.add_scalar("loss", train_loss, global_step)
                     tb_writer.add_scalar("train_ppl", train_ppl, global_step)
                     tr_loss = tr_lm_loss = 0.
 
                     # also evaluate on valid set for ppl
                     logger.info(" Evaluation Results of step %d: " % global_step)
-                    results = evaluate(args, model.module, tokenizer)
+                    results = evaluate(args, model, tokenizer)
                     for key, value in results.items():
                         tb_writer.add_scalar("eval_{}".format(key), value, global_step)
                         logger.info("\t %s: %0.4f" % (key, value))
@@ -284,11 +259,11 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
                     t_start = time.time()
 
-                if args.gpu == 0 and args.ckpt_steps > 0 and global_step % args.ckpt_steps == 0:
+                if args.ckpt_steps > 0 and global_step % args.ckpt_steps == 0:
                     checkpoint_name = f"checkpoint-{global_step:08d}"
                     ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
                     os.makedirs(ckpt_dir, exist_ok=True)
-                    save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler)
+                    save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler, scaler)
 
             if args.max_steps > 0 and global_step >= args.max_steps:
                 break
@@ -299,20 +274,13 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
         epochs_trained += 1
 
-    # consider during the last evaluation, the GPU 0 is still working while others have exited.
-    # when GPU 0 call torch.no_grad, it will wait for the response from other processes
-    # however, a deadlock will be caused if other processes just exit
-    torch.distributed.barrier()
-
-    if args.gpu == 0:
-        tb_writer.close()
+    tb_writer.close()
 
 def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix="") -> Dict:
     # Loop to handle MNLI double evaluation (matched, mis-matched)
     eval_dataset = load_and_cache_examples(args, tokenizer, evaluate=True)
 
     args.eval_batch_size = args.eval_batch_size
-    # Note that DistributedSampler samples randomly
 
     def collate(examples: List[torch.Tensor]):
         if tokenizer._pad_token is None:
@@ -355,14 +323,11 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
     return result
 
 
-def save_model(args, ckpt_dir, name, model, tokenizer, optimizer, scheduler):
+def save_model(args, ckpt_dir, name, model, tokenizer, optimizer, scheduler, scaler):
     # Save model checkpoint
     output_dir = os.path.join(ckpt_dir, name)
     os.makedirs(output_dir, exist_ok=True)
-    model_to_save = (
-        model.module if hasattr(model, "module") else model
-    )  # Take care of distributed/parallel training
-    model_to_save.save_pretrained(output_dir)
+    model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
 
     torch.save(args, os.path.join(output_dir, "training_args.bin"))
@@ -370,6 +335,8 @@ def save_model(args, ckpt_dir, name, model, tokenizer, optimizer, scheduler):
 
     torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
     torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+    torch.save(scaler.state_dict(), os.path.join(output_dir, "scaler.pt"))
+
     logger.info("Saving optimizer and scheduler states to %s", output_dir)
 
 
@@ -377,19 +344,6 @@ def main():
     parser = process_args()
     args = parser.parse_args()
 
-    os.environ['MASTER_ADDR'] = '127.0.0.1'
-    port = 9595
-    print("Use port", port)
-    os.environ['MASTER_PORT'] = str(port)
-
-    # Using all available gpus for multi-processing distributed
-    args.gpus = torch.cuda.device_count()
-    print("Use gpus ", list(range(args.gpus)))
-    args.world_size = args.gpus * args.nodes
-    mp.spawn(setup, nprocs=args.gpus, args=(args,))
-
-
-def setup(gpu, args):
     if args.should_continue:
         ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
         checkpoint_names = []
@@ -402,39 +356,15 @@ def setup(gpu, args):
             logger.warning('No checkpoint detected: %s', ckpt_dir)
             args.model_name_or_path = None
 
-    # Setup CUDA, GPU & distributed training
-    torch.cuda.set_device(gpu)
-    device = torch.device("cuda", gpu)
-    args.gpu = gpu                                  # Local device id.
-    args.device = device                            # Local device object.
-    args.rank = args.nr * args.gpus + gpu           # The gpu id in the world.
-    torch.distributed.init_process_group(
-        backend="nccl",
-        init_method='env://',
-        world_size=args.world_size,
-        rank=args.rank
-    )
-
-    # Setup logging
+             
+    args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO if args.gpu == 0 else logging.WARN,
+        level=logging.INFO,
     )
-    logger.warning(
-        "Process GPU: %s, num_of_total_GPUs: %s, distributed training: True, 16-bits training: %s",
-        args.gpu, args.gpus, args.fp16,
-    )
-
-    # Set seed
     set_seed(args)
-
-    # Load pretrained model and token
-    # Barrier to make sure only the first process in distributed training
-    # download model & vocabizer
-    if gpu != 0:
-        torch.distributed.barrier()
-
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
 
     # Get Config
@@ -480,26 +410,15 @@ def setup(gpu, args):
 
     model.to(args.device)
 
-    # End of barrier to make sure only the first process waiting other processes
-    if gpu == 0:
-        torch.distributed.barrier()
-
     logger.info("Training/evaluation parameters %s", args)
 
     # Training
     if args.do_train:
-        # Barrier to make sure only the first process in distributed training process the dataset,
-        # and the others will use the cache
-        if gpu != 0:
-            torch.distributed.barrier()
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
-        if gpu == 0:
-            torch.distributed.barrier()
-
         train(args, train_dataset, model, tokenizer)
 
     # Evaluation
-    if args.do_eval and gpu == 0:
+    if args.do_eval:
         result = evaluate(args, model, tokenizer)
 
 
