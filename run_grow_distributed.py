@@ -254,7 +254,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                     output_log_file = os.path.join(args.output_dir, "train_log.txt")
                     with open(output_log_file, 'a') as f:
                         eval_ppl = results['perplexity']
-                        print(f"train_step={global_step}, train_time={t_elapse}, lr={scheduler.get_lr()[0]}, train_loss={train_loss},"
+                        print(f"train_step={global_step}, train_time={t_elapse}, lr={scheduler.get_last_lr()[0]}, train_loss={train_loss},"
                             f"train_ppl={train_ppl}, eval_ppl={eval_ppl}", file=f)
 
                     t_start = time.time()
