@@ -806,7 +806,6 @@ def main():
         if not os.path.isfile(args.dynamics_path):
             initialize_hdf5_file_eval(args.dynamics_path, args.max_steps * args.eval_batch_size,  len(model_names))
         
-        print(args.dynamics_path)
         eval_ckpts = list(range(3, 16))
         for i in eval_ckpts:
             if i >= args.first_dynamics_ckpt:
