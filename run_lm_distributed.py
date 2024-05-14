@@ -572,7 +572,7 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
             geom_mean_confidence_copy = geom_mean_confidence.copy()
 
             save_thread = threading.Thread(target=async_add_probs_batch, 
-                                           args=(args.dynamics_path, offset, correctness_copy, mean_confidence_copy, geom_mean_confidence_copy, eval_run))
+                                           args=(args, args.dynamics_path, offset, correctness_copy, mean_confidence_copy, geom_mean_confidence_copy, eval_run))
             save_thread.start()
         
         if step + 1 >= args.max_steps:
@@ -791,13 +791,13 @@ def main():
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
 
         #random.shuffle(instance_list)
-        #instance_list = instance_list[:512*96]
         #instance_list_comp = list(range(len(train_dataset)))
         #random.shuffle(instance_list_comp)
         #assert (instance_list == instance_list_comp[:len(instance_list)]).all()
         #assert (instance_list_comp[len(instance_list):len(instance_list) + 256*96][0] not in instance_list)
         
-        #instance_list = instance_list_comp[len(instance_list) + 5000: len(instance_list) + 5000 + 256*96]
+        #instance_list = instance_list_comp[len(instance_list) + 5000: len(instance_list) + 5000 + 512*96]
+        #instance_list = instance_list[:512*96]
 
         args.max_steps = len(instance_list) // args.eval_batch_size
         args.logging_steps *= args.gradient_accumulation_steps
@@ -806,7 +806,8 @@ def main():
         if not os.path.isfile(args.dynamics_path):
             initialize_hdf5_file_eval(args.dynamics_path, args.max_steps * args.eval_batch_size,  len(model_names))
         
-        eval_ckpts = [5, 6, 9, 10, 12, 15]
+        print(args.dynamics_path)
+        eval_ckpts = list(range(3, 16))
         for i in eval_ckpts:
             if i >= args.first_dynamics_ckpt:
                 args.model_name_or_path = model_names[i]
@@ -823,6 +824,7 @@ def main():
 
                 if args.random_masks:
                     args.seed = random.randint(100, 1000000)
+                    print(args.seed)
 
                 evaluate_train(args, train_dataset, instance_list, i, model, tokenizer)
     else:
