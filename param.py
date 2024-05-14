@@ -146,7 +146,7 @@ def process_args():
     parser.add_argument("--nr", type=int, default=0)
 
     # Training Dynamics
-    parser.add_argument("--track_dynamics", action="store_true", help="Whether to track the training dynamics.")
+    parser.add_argument("--random_masks", action="store_true", help="Randomizes the masks used for generating data maps instead of using the same masks used for training.")
     parser.add_argument("--compute_dynamics", action="store_true", help="Compute dynamics from model checkpoint.")
 
     parser.add_argument("--dynamics_path", default="data/dynamics/", type=str, help="Path to save the dynamics data.")
