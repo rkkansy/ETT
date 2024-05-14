@@ -11,21 +11,18 @@ split_sent = True
 shuffle = True
 mlm = True
 
-fp16 = False
 scheduler_type = one_cycle
 max_grad_norm = 0.5
-adam_epsilon = 0.000000000001
+adam_epsilon = 1e-12
 
-track_dynamics = True
-compute_dynamics = False
-first_dynamics_ckpt = 10
+first_dynamics_ckpt = 3
 
 train_batch_size = 96
-eval_batch_size = 128
+eval_batch_size = 96
 gradient_accumulation_steps = 16
 
 max_steps = 40000
-learning_rate = 0.00004
+learning_rate = 4e-5
 weight_decay = 0.01 
 warmup_steps = 10000
 
