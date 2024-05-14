@@ -1104,3 +1104,62 @@ class BertForMaskedLM(BertPreTrainedModel):
 
         return {"input_ids": input_ids, "attention_mask": attention_mask}
 
+class BertForSequenceClassificationPreNorm(BertPreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+        self.bert = BertModel(config)
+        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+        self.regression = True if config.num_labels == 1 else False
+        if self.regression:
+            self.loss_fct = MSELoss()
+        else:
+            self.loss_fct = CrossEntropyLoss()
+
+    def forward(self, input_ids=None, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None, inputs_embeds=None, labels=None, return_dict=None):
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        
+        outputs = self.bert(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            return_dict=return_dict
+        )
+        
+        sequence_output = outputs[0]  # the first element is 'last_hidden_state'
+        pooled_output = sequence_output[:, 0]  # use the first token for classification/regression
+        
+        logits = self.classifier(pooled_output)
+        
+        # Squeeze logits to match labels for regression task (stsb)
+        if self.regression:
+            logits = logits.squeeze(-1)
+        
+        loss = None
+        if labels is not None:
+            if self.regression:
+                # Ensure labels are floats for regression
+                labels = labels.float()
+                # No need to reshape logits for regression since we expect a single value output
+            else:
+                # Ensure labels are long ints for classification
+                labels = labels.long()
+                logits = logits.view(-1, self.config.num_labels)  # Reshape for classification
+                labels = labels.view(-1)
+
+            loss = self.loss_fct(logits, labels)
+
+        if not return_dict:
+            return (logits,) + outputs[2:] if loss is None else (loss, logits) + outputs[2:]
+
+        if self.regression:
+            logits = logits.unsqueeze(-1)
+            
+        return SequenceClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states if return_dict else None,
+            attentions=outputs.attentions if return_dict else None
+        )
