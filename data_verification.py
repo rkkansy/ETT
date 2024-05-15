@@ -154,9 +154,32 @@ def load_train_data_from_hdf5(file_path):
     
     return data
 
+def extract_data_from_log(file_path):
+    data = {
+        "train_step": [],
+        "train_time": [],
+        "lr": [],
+        "train_loss": [],
+        "scale": [],
+        "grad_norm": [],
+        "train_ppl": [],
+        "eval_ppl": []
+    }
+
+    with open(file_path, 'r') as file:
+        for line in file:
+            line = line.strip()
+            if line:
+                parts = line.split(", ")
+                for part in parts:
+                    key, value = part.split("=")
+                    data[key].append(float(value))
+
+    return data
+
 def epoch_mean(instance_order, vals, selected_epochs, instance_range):
 
-    instance_indices = np.array(range(instance_range[0], instance_range[1]))
+    instance_indices = np.array(range(instance_range[0], instance_range[1], 16))
     epoch_indices = np.array(selected_epochs)
     selected_vals = vals[instance_indices[:, None], epoch_indices]
     means = np.mean(selected_vals, axis=1)
@@ -165,69 +188,248 @@ def epoch_mean(instance_order, vals, selected_epochs, instance_range):
 
 def epoch_variability(instance_order, vals, selected_epochs, instance_range):
 
-    instance_indices = np.array(range(instance_range[0], instance_range[1]))
+    instance_indices = np.array(range(instance_range[0], instance_range[1], 16))
     epoch_indices = np.array(selected_epochs)
     selected_vals = vals[instance_indices[:, None], epoch_indices]
     variabilities = np.var(selected_vals, axis=1)
     
     return variabilities
-    
 
-def make_plot_epoch(instance_order, correctness, mean_confidence, geom_mean_confidence, instance_range, selected_epochs):
+def select_top_indices(data, frac=0.33):
 
-    mean_confidences = epoch_mean(instance_order, mean_confidence, selected_epochs, instance_range)
-    geom_mean_confidences = epoch_mean(instance_order, geom_mean_confidence, selected_epochs, instance_range)
+    num_to_select = int(len(data) * frac)
+    sorted_indices = np.argsort(data)[::-1]
+    top_indices = sorted_indices[:num_to_select]
+
+    return top_indices
+
+def select_bottom_indices(data, frac=0.33):
+    num_to_select = int(len(data) * frac)
+    sorted_indices = np.argsort(data)
+    bottom_indices = sorted_indices[:num_to_select]
+
+    return bottom_indices
+
+def compare_indices(indices1, indices2):
+
+    set1 = set(indices1)
+    set2 = set(indices2)
     
-    variabilities_mean = epoch_variability(instance_order, mean_confidence, selected_epochs, instance_range)
-    variabilities_geom_mean = epoch_variability(instance_order, geom_mean_confidence, selected_epochs, instance_range)
+    common_indices = set1 & set2
+    unique_indices1 = set1 - set2
+    unique_indices2 = set2 - set1
     
-    correctness_means = epoch_mean(instance_order, correctness, selected_epochs, instance_range)
-    correctness_colors = [plt.cm.coolwarm(x) for x in correctness_means]
+    percent_common = len(common_indices) / len(set1)
+    
+    return {
+        "percent_common": percent_common,
+        "common_indices": common_indices,
+        "unique_indices1": unique_indices1,
+        "unique_indices2": unique_indices2,
+    }
+
+def make_plot_epoch(args, instance_order, correctness_means1, correctness_means2, mean_confidences, geom_mean_confidences, variabilities_mean, variabilities_geom_mean):
+    markers = []
+    for i, corr in enumerate(correctness_means1):
+        if 0 < corr <= 0.1:
+            markers.append('o')  # Circle
+        elif 0.1 < corr <= 0.2:
+            markers.append('*')  # Star
+        elif 0.2 < corr <= 0.3:
+            markers.append('+')  # Plus
+        elif 0.3 < corr <= 0.5:
+            markers.append('x')  # Cross
+        elif 0.5 < corr <= 0.7:
+            markers.append('D')  # Diamond
+        elif 0.7 < corr <= 0.8:
+            markers.append('s')  # Square
+        elif 0.8 < corr <= 1.0:
+            markers.append('^')  # Triangle
+        else:
+            markers.append('.')  # Point
+
+    markers2 = []
+    for i, corr in enumerate(correctness_means2):
+        if 0 < corr <= 0.1:
+            markers2.append('o')  # Circle
+        elif 0.1 < corr <= 0.2:
+            markers2.append('*')  # Star
+        elif 0.2 < corr <= 0.3:
+            markers2.append('+')  # Plus
+        elif 0.3 < corr <= 0.5:
+            markers2.append('x')  # Cross
+        elif 0.5 < corr <= 0.7:
+            markers2.append('D')  # Diamond
+        elif 0.7 < corr <= 0.8:
+            markers2.append('s')  # Square
+        elif 0.8 < corr <= 1.0:
+            markers2.append('^')  # Triangle
+        else:
+            markers2.append('.')  # Point
 
     fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(8, 12))
 
-    sc1 = axes[0].scatter(variabilities_mean, mean_confidences, c=correctness_colors, alpha=0.5)
+    # Plotting for Mean Confidences vs. Variabilities
+    colors1 = plt.cm.coolwarm(correctness_means1)  # Precompute all colors
+
+    colors2 = plt.cm.coolwarm(correctness_means2)  # Precompute all colors
+
+    for x, y, m, c in zip(variabilities_mean, mean_confidences, markers, colors1):
+        axes[0].scatter(x, y, marker=m, color=c, alpha=0.5)
     axes[0].set_title('New: Mean Confidences vs. Variabilities')
     axes[0].set_xlabel('Variability')
     axes[0].set_ylabel('Mean Confidence')
     axes[0].grid(True)
 
-    # New method - Geometric Mean Confidences vs. Variabilities
-    sc2 = axes[1].scatter(variabilities_geom_mean, geom_mean_confidences, c=correctness_colors, alpha=0.5)
+    # Plotting for Geometric Mean Confidences vs. Variabilities
+    for x, y, m, c in zip(variabilities_geom_mean, geom_mean_confidences, markers2, colors2):
+        axes[1].scatter(x, y, marker=m, color=c, alpha=0.5)
     axes[1].set_title('New: Geometric Mean Confidences vs. Variabilities')
     axes[1].set_xlabel('Variability')
     axes[1].set_ylabel('Geometric Mean Confidence')
     axes[1].grid(True)
 
     # Colorbars for the scatter plots
-    cbar1 = plt.colorbar(sc1, ax=axes[0])
+    cbar1 = plt.colorbar(plt.cm.ScalarMappable(cmap='coolwarm'), ax=axes[0])
     cbar1.set_label('Correctness')
-    cbar2 = plt.colorbar(sc2, ax=axes[1])
+    cbar2 = plt.colorbar(plt.cm.ScalarMappable(cmap='coolwarm'), ax=axes[1])
     cbar2.set_label('Correctness')
 
     plt.tight_layout()
-    plt.show()
-
+    plt.savefig(os.path.join(args.output_dir, "epoch_plot.png"))
             
+
+def make_plot_epoch2(args, instance_order, correctness_means, mean_confidences, geom_mean_confidences, variabilities_mean, variabilities_geom_mean):
+    # Create marker array based on correctness levels
+    markers = ['o' if 0 < x <= 0.1 else '*' if 0.1 < x <= 0.2 else '+' if 0.2 < x <= 0.3 else 'x' if 0.3 < x <= 0.5 else 
+               'D' if 0.5 < x <= 0.7 else 's' if 0.7 < x <= 0.8 else '^' if 0.8 < x <= 1.0 else '.' for x in correctness_means]
+
+    fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(8, 12))
+
+    # Filter data where mean_confidences < 0.2
+    filter_indices = np.where(mean_confidences < 0.8 and variabilities_mean < 0.25)
+    filtered_mean_confidences = mean_confidences[filter_indices]
+    filtered_variabilities_mean = variabilities_mean[filter_indices]
+    filtered_colors = plt.cm.coolwarm(correctness_means[filter_indices])
+    filtered_markers = [markers[i] for i in filter_indices[0]]
+
+    # Plotting for Mean Confidences vs. Variabilities with filtered data
+    for x, y, m, c in zip(filtered_variabilities_mean, filtered_mean_confidences, filtered_markers, filtered_colors):
+        axes[0].scatter(x, y, marker=m, color=c, alpha=0.5)
+    axes[0].set_title('Filtered: Mean Confidences vs. Variabilities (<0.2)')
+    axes[0].set_xlabel('Variability')
+    axes[0].set_ylabel('Mean Confidence')
+    axes[0].grid(True)
+
+    # Apply similar filtering for geometric mean confidences if needed
+    filter_indices_geom = np.where(geom_mean_confidences < 0.8 and variabilities_geom_mean < 0.04)
+    filtered_geom_mean_confidences = geom_mean_confidences[filter_indices_geom]
+    filtered_variabilities_geom_mean = variabilities_geom_mean[filter_indices_geom]
+    filtered_colors_geom = plt.cm.coolwarm(correctness_means[filter_indices_geom])
+    filtered_markers_geom = [markers[i] for i in filter_indices_geom[0]]
+
+    # Plotting for Geometric Mean Confidences vs. Variabilities with filtered data
+    for x, y, m, c in zip(filtered_variabilities_geom_mean, filtered_geom_mean_confidences, filtered_markers_geom, filtered_colors_geom):
+        axes[1].scatter(x, y, marker=m, color=c, alpha=0.5)
+    axes[1].set_title('Filtered: Geometric Mean Confidences vs. Variabilities (<0.2)')
+    axes[1].set_xlabel('Variability')
+    axes[1].set_ylabel('Geometric Mean Confidence')
+    axes[1].grid(True)
+
+    # Add colorbars and legends as needed
+    plt.colorbar(plt.cm.ScalarMappable(cmap='coolwarm'), ax=axes[0]).set_label('Correctness')
+    plt.colorbar(plt.cm.ScalarMappable(cmap='coolwarm'), ax=axes[1]).set_label('Correctness')
+    plt.tight_layout()
+    plt.savefig(os.path.join(args.output_dir, "filtered_epoch_plot_2.png"))
+
+
+def process_dataset(data, instance_order, epochs):
+    mean_confidence = data['mean_confidence']
+    geom_mean_confidence = data['geom_mean_confidence']
+    correctness = data['correctness']
+
+    # Set the epochs and selected instances parameters
+    
+    selected_instances = [0, 512*96]
+
+    # Compute metrics
+    mean_confidences = epoch_mean(instance_order, mean_confidence, epochs, selected_instances)
+    geom_mean_confidences = epoch_mean(instance_order, geom_mean_confidence, epochs, selected_instances)
+    
+    variabilities_mean = epoch_variability(instance_order, mean_confidence, epochs, selected_instances)
+    variabilities_geom_mean = epoch_variability(instance_order, geom_mean_confidence, epochs, selected_instances)
+
+    correctness_means = epoch_mean(instance_order, correctness, epochs, selected_instances)
+    
+    # Print average correctness for debugging or inspection
+    #for i in range(5):
+    #    print()
+    #    print(i, correctness[i][5], correctness[i][10], correctness[i][15])
+    #    print(i, mean_confidence[i][5], mean_confidence[i][10], mean_confidence[i][15])
+    #    print(i, geom_mean_confidence[i][5], geom_mean_confidence[i][10], geom_mean_confidence[i][15])
+    #    print()
+
+    print(np.mean(correctness_means))
+    print(np.mean(mean_confidences))
+    print(np.mean(geom_mean_confidences))
+    print(np.mean(variabilities_mean))
+    print(np.mean(variabilities_geom_mean))    
+    print()
+
+    return {
+        "mean_confidences": mean_confidences,
+        "geom_mean_confidences": geom_mean_confidences,
+        "variabilities_mean": variabilities_mean,
+        "variabilities_geom_mean": variabilities_geom_mean,
+        "correctness_means": correctness_means
+    }
+
 def eval(args):
     set_seed(args)  # Added here for reproducibility
 
     data_eval = load_eval_data_from_hdf5(os.path.join(args.output_dir, "dynamics_eval.hdf5"))
+    data_eval_seed = load_eval_data_from_hdf5(os.path.join(args.output_dir, "dynamics_eval_rdm_masks.hdf5"))
+
     data_train = load_train_data_from_hdf5(os.path.join(args.output_dir, "instances_masks.hdf5"))
 
+    proc_data = data_eval
     # Extract relevant metrics from synchronous evaluation data
-    mean_confidence = data_eval['mean_confidence']
-    geom_mean_confidence = data_eval['geom_mean_confidence']
-    correctness = data_eval['correctness']
-
-    # Extract training data indices and masks
     instance_order = data_train['instance_order']
-    masks = data_train['masks']
-    
-    epochs = [13, 14, 15]
-    selected_instances = [0, len(geom_mean_confidence)]
+    epochs1 = [5, 6, 7, 8 ,9, 10, 11, 12, 13, 14, 15]
+    epochs2 = [5, 15]
+    results_eval = process_dataset(proc_data, instance_order, epochs1)
+    results_eval_seed = process_dataset(proc_data, instance_order, epochs2)
 
-    make_plot_epoch(instance_order, correctness, mean_confidence, geom_mean_confidence, selected_instances, epochs)
+    for i in range(16):
+        print(i, data_eval_seed['mean_confidence'][0][i])
+
+    mean_confidences_top_indices = select_top_indices(results_eval['mean_confidences'])
+    seed_mean_confidences_top_indices = select_top_indices(results_eval_seed['mean_confidences'])
+
+    variabilities_mean_top_indices = select_top_indices(results_eval['variabilities_mean'])
+    variabilities_seed_mean_top_indices = select_top_indices(results_eval_seed['variabilities_mean'])
+
+    mean_confidences_bottom_indices = select_bottom_indices(results_eval['mean_confidences'])
+    seed_mean_confidences_bottom_indices = select_bottom_indices(results_eval_seed['mean_confidences'])
+
+    mean_easy_instances = instance_order[mean_confidences_top_indices]
+    seed_mean_easy_instances = instance_order[seed_mean_confidences_top_indices]
+
+    mean_hard_instances = instance_order[mean_confidences_bottom_indices]
+    seed_mean_hard_instances = instance_order[seed_mean_confidences_bottom_indices]
+
+    mean_ambiguous_instances = instance_order[variabilities_mean_top_indices]
+    seed_mean_ambiguous_instances = instance_order[variabilities_seed_mean_top_indices]
+
+    print("Easy: ",compare_indices(mean_easy_instances, seed_mean_easy_instances)['percent_common'])
+    print()
+    print("Ambig: ",compare_indices(mean_ambiguous_instances, seed_mean_ambiguous_instances)['percent_common'])
+    print()
+    print("Hard: ",compare_indices(mean_hard_instances, seed_mean_hard_instances)['percent_common'])
+
+    make_plot_epoch(args, instance_order, results_eval['correctness_means'], results_eval_seed['correctness_means'], results_eval['mean_confidences'], results_eval_seed['mean_confidences'], results_eval['variabilities_mean'], results_eval_seed['variabilities_mean'])
+    #make_plot_epoch(args, instance_order, results_eval['correctness_means'], results_eval_seed['correctness_means'], results_eval['geom_mean_confidences'], results_eval_seed['geom_mean_confidences'], results_eval['variabilities_geom_mean'], results_eval_seed['variabilities_geom_mean'])
+
 
 def main():
     parser = process_args()
