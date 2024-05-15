@@ -246,7 +246,7 @@ def async_add_probs_batch(args, filename, offset, correctness, mean_probs, geom_
             f["geom_mean_confidence"][i + offset, eval_epoch] = geom_mean_probs[i]
     
     print()
-    print(f"Finished saving data for step: {eval_epoch}: {offset // (args.eval_batch_size)}")
+    print(f"Finished saving data for step: {eval_epoch}: {offset // args.eval_batch_size} - {args.logging_steps + offset // args.eval_batch_size}")
        
 
 def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> Tuple[int, float]:
