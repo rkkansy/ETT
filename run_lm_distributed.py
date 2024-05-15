@@ -367,7 +367,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         instance_list = list(range(0, len(train_dataset)))
         random.shuffle(instance_list)
         instance_list = instance_list[:epoch_size]
-        initialize_hdf5_file(args.dynamics_path, instance_list, args.block_size + 2)
+        initialize_hdf5_file(args.dynamics_path, instance_list)
 
     if args.grow_scheme == 'none':
         data = load_train_data_from_hdf5(args.dynamics_path)
@@ -797,16 +797,16 @@ def main():
         #assert (instance_list_comp[len(instance_list):len(instance_list) + 256*96][0] not in instance_list)
         
         #instance_list = instance_list_comp[len(instance_list) + 5000: len(instance_list) + 5000 + 512*96]
-        #instance_list = instance_list[:512*96]
+        instance_list = instance_list[:512*96]
 
         args.max_steps = len(instance_list) // args.eval_batch_size
-        args.logging_steps *= args.gradient_accumulation_steps
+        #args.logging_steps *= args.gradient_accumulation_steps
         args.dynamics_path = os.path.join(args.output_dir, "dynamics_eval_rdm_masks.hdf5") if args.random_masks else os.path.join(args.output_dir, "dynamics_eval.hdf5") 
 
         if not os.path.isfile(args.dynamics_path):
             initialize_hdf5_file_eval(args.dynamics_path, args.max_steps * args.eval_batch_size,  len(model_names))
         
-        eval_ckpts = list(range(3, 16))
+        eval_ckpts = list(range(len(model_names)))
         for i in eval_ckpts:
             if i >= args.first_dynamics_ckpt:
                 args.model_name_or_path = model_names[i]
