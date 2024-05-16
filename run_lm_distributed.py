@@ -65,7 +65,7 @@ from transformers import (
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
-from data import CoLDataset, CustomSampler
+from data import *
 from param import process_args
 from model import SimpleBertForMaskedLM, SimpleRobertaForMaskedLM
 
@@ -205,50 +205,6 @@ def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args, get_
     # The rest of the time (10% of the time) we keep the masked input tokens unchanged
     return inputs, labels, operation_mask
 
-
-def decode_tokens_with_mask(tokenizer, inputs, masked_indices):
-
-    tokens = tokenizer.convert_ids_to_tokens(inputs.tolist())
-    for idx, mask in enumerate(masked_indices):
-        if mask:
-            tokens[idx] = '[MASK]'
-    return tokenizer.convert_tokens_to_string(tokens)
-
-def load_train_data_from_hdf5(file_path):
-                         
-    data = {
-        "instance_order" : [],
-
-    }
-    with h5py.File(file_path, 'r') as f:
-        data['instance_order'] = f['instance_order'][:]
-    
-    return data
-    
-def initialize_hdf5_file(filename, instance_list):
-
-    with h5py.File(filename, 'w') as f:
-        f.create_dataset("instance_order", data=np.array(instance_list, dtype=np.int32))
-
-def initialize_hdf5_file_eval(filename, data_size, eval_iterations):
-
-    with h5py.File(filename, 'w') as f:
-        f.create_dataset("mean_confidence", shape=(data_size, eval_iterations), dtype=np.float32)
-        f.create_dataset("geom_mean_confidence", shape=(data_size, eval_iterations), dtype=np.float32)
-        f.create_dataset("correctness", shape=(data_size, eval_iterations), dtype=np.float32)
-            
-def async_add_probs_batch(args, filename, offset, correctness, mean_probs, geom_mean_probs, eval_epoch=0):
-
-    with h5py.File(filename, 'a') as f: 
-        for i in range(len(correctness)):
-            f["correctness"][i + offset, eval_epoch] = correctness[i]
-            f["mean_confidence"][i + offset, eval_epoch] = mean_probs[i]
-            f["geom_mean_confidence"][i + offset, eval_epoch] = geom_mean_probs[i]
-    
-    print()
-    print(f"Finished saving data for step: {eval_epoch}: {offset // args.eval_batch_size} - {args.logging_steps + offset // args.eval_batch_size}")
-       
-
 def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> Tuple[int, float]:
     set_seed(args)  # Added here for reproducibility
     info = True
@@ -350,10 +306,8 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
     batch_size = args.train_batch_size * args.gradient_accumulation_steps
     epoch_size = args.max_steps * batch_size
-
-    if epoch_size > len(train_dataset):
-        args.max_steps = len(train_dataset) // batch_size
-        epoch_size = args.max_steps * args.train_batch_size * args.gradient_accumulation_steps
+    epoch_size = epoch_size if epoch_size < len(train_dataset) else len(train_dataset) - 1
+    instance_list = []
 
     args.dynamics_path = os.path.join(args.output_dir, "instances_masks.hdf5")
     # IMPORTANT: save the initialization
@@ -364,30 +318,41 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         os.makedirs(ckpt_dir, exist_ok=True)
         save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler, scaler)
 
-        instance_list = list(range(0, len(train_dataset)))
-        random.shuffle(instance_list)
-        instance_list = instance_list[:epoch_size]
-        initialize_hdf5_file(args.dynamics_path, instance_list)
+        if args.data_partition == 'none':
 
-    if args.grow_scheme == 'none':
-        data = load_train_data_from_hdf5(args.dynamics_path)
-        instance_list = data['instance_order']
+            instance_list = list(range(0, len(train_dataset)))
+            random.shuffle(instance_list)
+            instance_list = instance_list[:epoch_size]
+            initialize_hdf5_file(args.dynamics_path, instance_list)
 
-    else: 
-        instance_list = list(range(0, epoch_size))
-        random.shuffle(instance_list)
+        else:
+            args.partition_data_path = os.path.join(args.partition_data_path, f"{args.data_partition}.hdf5")
+            instance_list  = load_train_data_from_hdf5(args.partition_data_path)['instance_order']
+    else:
+        if args.grow_scheme == 'none':
+            if args.data_partition == 'none':
+                instance_list = load_train_data_from_hdf5(args.dynamics_path)['instance_order']
+            else:
+                args.partition_data_path = os.path.join(args.partition_data_path, f"{args.data_partition}.hdf5")
+                instance_list  = load_train_data_from_hdf5(args.partition_data_path)['instance_order']
 
-    start_index = global_step * batch_size
-    instance_list = instance_list[start_index:]
+        else: 
+            instance_list = list(range(0, epoch_size))
+            random.shuffle(instance_list)
+
+    epochs_trained = global_step // (len(instance_list) // args.train_batch_size // args.gradient_accumulation_steps)
+    steps_per_epoch = len(instance_list) // batch_size
+    start_index = (global_step % steps_per_epoch) * batch_size
+
+    if args.data_partition == 'none':
+        instance_list = instance_list[start_index:]
+    else:
+        instance_list = instance_list[:steps_per_epoch * batch_size]
 
     train_sampler = CustomSampler(instance_list)
-
-    train_dataloader = DataLoader(
-        train_dataset, sampler=train_sampler, shuffle=False, num_workers=0,
-        batch_size=args.train_batch_size, collate_fn=collate, pin_memory=True
+    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, shuffle=False, num_workers=0,
+                                  batch_size=args.train_batch_size, collate_fn=collate, pin_memory=True
     )
-
-    epochs_trained = global_step // (len(train_dataloader) // args.gradient_accumulation_steps)
 
     while True:
         epoch_iterator = tqdm(train_dataloader, 
@@ -797,10 +762,10 @@ def main():
         #assert (instance_list_comp[len(instance_list):len(instance_list) + 256*96][0] not in instance_list)
         
         #instance_list = instance_list_comp[len(instance_list) + 5000: len(instance_list) + 5000 + 512*96]
-        instance_list = instance_list[:512*96]
+        #instance_list = instance_list[:512*96]
 
         args.max_steps = len(instance_list) // args.eval_batch_size
-        #args.logging_steps *= args.gradient_accumulation_steps
+        args.logging_steps *= args.gradient_accumulation_steps
         args.dynamics_path = os.path.join(args.output_dir, "dynamics_eval_rdm_masks.hdf5") if args.random_masks else os.path.join(args.output_dir, "dynamics_eval.hdf5") 
 
         if not os.path.isfile(args.dynamics_path):
