@@ -152,7 +152,7 @@ def process_args():
     parser.add_argument("--dynamics_path", default="data/dynamics/", type=str, help="Path to save the dynamics data.")
     parser.add_argument("--first_dynamics_ckpt", default=0, type=int, help="The first checkpoint that should be evaluated for training dynamics.")
 
-    parser.add_argument("--data_partition", nargs='*', default=['none'], type=str,
+    parser.add_argument("--data_partition", default='none', type=str,
                         choices=['easy', 'ambiguous', 'hard', 'rand', 'none'],
                         help="Which part of the data should be used for training. Requires training dynamics to be computed."
     )
