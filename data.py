@@ -1,11 +1,11 @@
 import copy
 import os
 import random
+import numpy as np
 
 import h5py
 import torch
 from torch.utils.data import DataLoader, Dataset
-import tqdm
 from torch.utils.data import Sampler
 
 class CustomSampler(Sampler):
@@ -18,7 +18,78 @@ class CustomSampler(Sampler):
     
     def __len__(self):
         return len(self.indices)
+
+def extract_data_from_log(file_path):
+    data = {
+        "train_step": [],
+        "train_time": [],
+        "lr": [],
+        "train_loss": [],
+        "scale": [],
+        "grad_norm": [],
+        "train_ppl": [],
+        "eval_ppl": []
+    }
+
+    with open(file_path, 'r') as file:
+        for line in file:
+            line = line.strip()
+            if line:
+                parts = line.split(", ")
+                for part in parts:
+                    key, value = part.split("=")
+                    data[key].append(float(value))
+
+    return data
+
+def load_train_data_from_hdf5(file_path):
+                         
+    data = {
+        "instance_order" : [],
+
+    }
+    with h5py.File(file_path, 'r') as f:
+        data['instance_order'] = f['instance_order'][:]
     
+    return data
+
+def load_eval_data_from_hdf5(file_path):
+                         
+    data = {
+        "mean_confidence" : [],
+        "geom_mean_confidence" : [],
+        "correctness" : [],
+    }
+    with h5py.File(file_path, 'r') as f:
+        data['mean_confidence'] = f['mean_confidence'][:]
+        data['geom_mean_confidence'] = f['geom_mean_confidence'][:]
+        data['correctness'] = f['correctness'][:]   
+    
+    return data
+    
+def initialize_hdf5_file(filename, instance_list):
+
+    with h5py.File(filename, 'w') as f:
+        f.create_dataset("instance_order", data=np.array(instance_list, dtype=np.int32))
+
+def initialize_hdf5_file_eval(filename, data_size, eval_iterations):
+
+    with h5py.File(filename, 'w') as f:
+        f.create_dataset("mean_confidence", shape=(data_size, eval_iterations), dtype=np.float32)
+        f.create_dataset("geom_mean_confidence", shape=(data_size, eval_iterations), dtype=np.float32)
+        f.create_dataset("correctness", shape=(data_size, eval_iterations), dtype=np.float32)
+            
+def async_add_probs_batch(args, filename, offset, correctness, mean_probs, geom_mean_probs, eval_epoch=0):
+
+    with h5py.File(filename, 'a') as f: 
+        for i in range(len(correctness)):
+            f["correctness"][i + offset, eval_epoch] = correctness[i]
+            f["mean_confidence"][i + offset, eval_epoch] = mean_probs[i]
+            f["geom_mean_confidence"][i + offset, eval_epoch] = geom_mean_probs[i]
+    
+    print()
+    print(f"Finished saving data for step: {eval_epoch}: {offset // args.eval_batch_size} - {args.logging_steps + offset // args.eval_batch_size}")
+
 class CoLDataset(Dataset):
     IGNORE_ID = -100
     sent_strategy = 'first'
