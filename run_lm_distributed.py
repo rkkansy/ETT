@@ -318,7 +318,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         os.makedirs(ckpt_dir, exist_ok=True)
         save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler, scaler)
 
-        if args.data_partition == 'none':
+        if args.data_partition == 'none' or args.data_partition == 'rand':
 
             instance_list = list(range(0, len(train_dataset)))
             random.shuffle(instance_list)
