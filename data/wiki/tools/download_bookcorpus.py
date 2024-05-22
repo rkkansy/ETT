@@ -9,6 +9,7 @@ def download_bookcorpus(book_path):
         if not os.path.isfile(os.path.join(book_path, 'bookcorpus_train.txt')):
             dataset = load_dataset("bookcorpus", split='train')
             output_file = os.path.join(book_path, 'bookcorpus_train.txt')
+            print("Preprocessing bookcorpus.")
             with open(output_file, 'w', encoding='utf-8') as f:
                 for item in dataset:
                     f.write(item['text'] + '\n')
