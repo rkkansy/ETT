@@ -4,12 +4,14 @@ block_size = 126
 
 do_train = True
 train_data_file = data/wiki-cased/en.train.raw
+train_data_file_bc = data/wiki-cased/en-bc.train.raw
 do_eval = True
 eval_data_file = data/wiki-cased/en.valid.raw
 col_data = True
 split_sent = True
 shuffle = True
 mlm = True
+add_bc = False
 
 scheduler_type = one_cycle
 max_grad_norm = 0.5

@@ -14,12 +14,16 @@ def process_args():
         "--train_data_file", default=None, type=str,
         help="The input training data file (a text file).")
     parser.add_argument(
+        "--train_data_file_bc", default=None, type=str,
+        help="The input training data file (a text file) for the bookcorpus.")
+    parser.add_argument(
         "--eval_data_file", default=None, type=str,
         help="An optional input evaluation data file to evaluate the perplexity on (a text file).")
     parser.add_argument("--do_train", action="store_true", help="Whether to run training.")
     parser.add_argument("--do_eval", action="store_true", help="Whether to run eval on the dev set.")
 
     # Data loader
+    parser.add_argument("--add_bc", action="store_true", help="Using the specific dataset object in data.py")
     parser.add_argument("--col_data", action="store_true", help="Using the specific dataset object in data.py")
     parser.add_argument("--split_sent", action="store_true", help="Overwrite the cached training and evaluation sets")
     parser.add_argument("--shuffle", action="store_true", help="Shuffle the training dataset")

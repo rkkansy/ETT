@@ -146,7 +146,7 @@ class LineByLineTextDataset(Dataset):
 
 
 def load_and_cache_examples(args, tokenizer, evaluate=False):
-    file_path = args.eval_data_file if evaluate else args.train_data_file
+    file_path = args.eval_data_file if evaluate else args.train_data_file_bc if args.add_bc else args.train_data_file
     if args.col_data:
         return CoLDataset(file_path, args.tokenizer_name, tokenizer, args.block_size,
                           split_sent=args.split_sent,
