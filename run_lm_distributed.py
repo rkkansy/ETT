@@ -231,6 +231,9 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
     ]
 
+    if args.scheduler_type == 'one_cycle':
+        args.learning_rate = 4e-5
+        
     optimizer = AdamW(optimizer_grouped_parameters,
                       betas=(0.9, 0.98),
                       lr=args.learning_rate,

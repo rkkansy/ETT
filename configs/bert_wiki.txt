@@ -11,7 +11,7 @@ col_data = True
 split_sent = True
 shuffle = True
 mlm = True
-add_bc = False
+add_bc = True
 
 scheduler_type = one_cycle
 max_grad_norm = 0.5
@@ -24,7 +24,7 @@ eval_batch_size = 96
 gradient_accumulation_steps = 16
 
 max_steps = 40000
-learning_rate = 4e-5
+learning_rate = 0.001
 weight_decay = 0.01 
 warmup_steps = 10000
 
