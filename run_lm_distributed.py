@@ -309,10 +309,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
     batch_size = args.train_batch_size * args.gradient_accumulation_steps
     epoch_size = args.max_steps * batch_size
-    epoch_size = epoch_size if epoch_size < len(train_dataset) else len(train_dataset) - 1
-    instance_list = []
 
-    args.dynamics_path = os.path.join(args.output_dir, "instances_masks.hdf5")
     # IMPORTANT: save the initialization
     if global_step == 0:
 
@@ -321,42 +318,28 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         os.makedirs(ckpt_dir, exist_ok=True)
         save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler, scaler)
 
-        if args.data_partition == 'none' or args.data_partition == 'rand':
-
+        if args.data_partition in ['none', 'rand']:
             instance_list = list(range(0, len(train_dataset)))
-            random.shuffle(instance_list)
-            instance_list = instance_list[:epoch_size]
-            initialize_hdf5_file(args.dynamics_path, instance_list)
-
         else:
-            args.partition_data_path = os.path.join(args.partition_data_path, f"{args.data_partition}.hdf5")
-            instance_list  = load_train_data_from_hdf5(args.partition_data_path)['instance_order']
-    else:
-        if args.grow_scheme == 'none':
-            if args.data_partition == 'none':
-                instance_list = load_train_data_from_hdf5(args.dynamics_path)['instance_order']
-            else:
-                args.partition_data_path = os.path.join(args.partition_data_path, f"{args.data_partition}.hdf5")
-                instance_list  = load_train_data_from_hdf5(args.partition_data_path)['instance_order']
+            instance_list  = load_train_data_from_hdf5(os.path.join(args.partition_data_path, f"{args.data_partition}.hdf5"))['instance_order']
 
-        else: 
-            instance_list = list(range(0, epoch_size))
-            random.shuffle(instance_list)
+        random.shuffle(instance_list)
+        if epoch_size < len(instance_list):
+            instance_list = instance_list[:epoch_size]
+    
+        initialize_hdf5_file(os.path.join(args.output_dir, "instances_masks.hdf5"), instance_list)
+
+    else:
+        instance_list = load_train_data_from_hdf5(os.path.join(args.output_dir, "instances_masks.hdf5"))['instance_order']
 
     epochs_trained = global_step // (len(instance_list) // args.train_batch_size // args.gradient_accumulation_steps)
-    steps_per_epoch = len(instance_list) // batch_size
-    start_index = (global_step % steps_per_epoch) * batch_size
-
-    if args.data_partition == 'none':
-        instance_list = instance_list[start_index:]
-    else:
-        instance_list = instance_list[:steps_per_epoch * batch_size]
+    steps_per_epoch = len(instance_list) // (args.train_batch_size * args.gradient_accumulation_steps)
+    start_index = (global_step % steps_per_epoch) * args.gradient_accumulation_steps
 
     train_sampler = CustomSampler(instance_list)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, shuffle=False, num_workers=0,
                                   batch_size=args.train_batch_size, collate_fn=collate, pin_memory=True
     )
-
     while True:
         epoch_iterator = tqdm(train_dataloader, 
                               desc=f"Steps trained: {global_step:06d}", 
@@ -364,13 +347,16 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         tr_loss, tr_lm_loss = 0.0, 0.0
         t_start = time.time()
         model.zero_grad()       # Support of accumulating gradients
-        
+
         for step, batch in enumerate(epoch_iterator):
+
+            if step < start_index:
+                continue
 
             inputs, labels, _ = mask_tokens(batch, tokenizer, args)
             inputs = inputs.to(args.device)
             labels = labels.to(args.device)
- 
+
             # If some of the input is padded, then the attention mask is needed
             attention_mask = (inputs != tokenizer.pad_token_id)         # word_tokens --> 1, pad_token --> 0
             if attention_mask.all():
@@ -441,15 +427,16 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                     os.makedirs(ckpt_dir, exist_ok=True)
                     save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler, scaler)
             
+            if args.max_steps > 0 and global_step >= args.max_steps:
+                break
 
         if args.max_steps > 0 and global_step >= args.max_steps:
             epoch_iterator.close()
             break
-
+        start_index = 0
         epochs_trained += 1
-    
-    tb_writer.close()
 
+    tb_writer.close()
 
 def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix=""):
     set_seed(args) 
@@ -538,9 +525,8 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
             correctness_copy = correctness.copy()
             mean_confidence_copy = mean_confidence.copy()
             geom_mean_confidence_copy = geom_mean_confidence.copy()
-
             save_thread = threading.Thread(target=async_add_probs_batch, 
-                                           args=(args, args.dynamics_path, offset, correctness_copy, mean_confidence_copy, geom_mean_confidence_copy, eval_run))
+                                           args=(args, args.output_dir, offset, correctness_copy, mean_confidence_copy, geom_mean_confidence_copy, eval_run))
             save_thread.start()
         
         if step + 1 >= args.max_steps:
@@ -592,6 +578,82 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
     result = {"perplexity": perplexity}
 
     return result
+
+def compute_dynamics(args, train_dataset, tokenizer):
+
+    # Setup logging
+        logging.basicConfig(
+            format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
+            datefmt="%m/%d/%Y %H:%M:%S",
+            level=logging.INFO
+        )
+        config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
+        ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
+
+        checkpoint_names = []
+        model_names = []
+        if os.path.isdir(ckpt_dir):
+            checkpoint_names = [fn for fn in os.listdir(ckpt_dir) if fn.startswith('checkpoint-')]
+        if len(checkpoint_names) > 0:
+            checkpoint_names = sorted(checkpoint_names, key=lambda p: int(p.split('-')[-1]))
+            for i, ckpt_name in enumerate(checkpoint_names):
+                model_names.append(os.path.join(ckpt_dir, ckpt_name))
+        else:
+            logger.warning('No checkpoint detected: %s', ckpt_dir)
+            return -1
+
+        assert args.block_size <= tokenizer.model_max_length
+
+        # Get Config
+        if args.config_name:
+            config = config_class.from_pretrained(args.config_name, cache_dir=args.cache_dir)
+        elif args.model_name_or_path:
+            config = config_class.from_pretrained(args.model_name_or_path, cache_dir=args.cache_dir)
+        else:
+            raise ValueError(
+                "Why do you want the default config?? Please use --config_name or --model_name_or_path"
+            )
+        
+        if args.dynamics_path == "none":
+            args.dynamics_path = args.output_dir
+
+        data = load_train_data_from_hdf5(os.path.join(args.dynamics_path, "instances_masks.hdf5"))
+        instance_list = data['instance_order']
+
+        args.max_steps = len(instance_list) // args.eval_batch_size
+        args.logging_steps *= args.gradient_accumulation_steps
+        args.output_dir = os.path.join(args.output_dir, "dynamics_eval_rdm_masks.hdf5") if args.random_masks else os.path.join(args.output_dir, "dynamics_eval.hdf5") 
+
+        if not os.path.isfile(args.output_dir):
+            initialize_hdf5_file_eval(args.output_dir, args.max_steps * args.eval_batch_size,  len(model_names))
+        
+        eval_thread = None
+        for i in args.dynamics_ckpts_list:
+
+                if eval_thread is not None:
+                    eval_thread.join()
+
+                args.model_name_or_path = model_names[i]
+                print(f"Evaluating {args.model_name_or_path} for {args.max_steps} steps.")
+
+                model = model_class.from_pretrained(
+                    args.model_name_or_path,
+                    from_tf=bool(".ckpt" in args.model_name_or_path),
+                    config=config,
+                    cache_dir=args.cache_dir,
+                    args=args
+                )
+                model.to(args.device)
+                if args.random_masks:
+                    args.seed = 42
+                
+                #eval_thread = threading.Thread(target=evaluate_train, args=(args, train_dataset, instance_list, i, model, tokenizer))
+                #eval_thread.start()
+                evaluate_train(args, train_dataset, instance_list, i, model, tokenizer)
+
+        if eval_thread is not None:
+            eval_thread.join()
+
 
 def save_model(args, ckpt_dir, name, model, tokenizer, optimizer, scheduler, scaler):
     # Save model checkpoint
@@ -705,106 +767,23 @@ def main():
     set_seed(args)
 
     args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model, tokenizer = get_model_tokenizer(args)
+    train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
+
+    train_thread = None
+    # Training
+    if args.do_train:
+        model.to(args.device)
+        train(args, train_dataset, model, tokenizer)
+        #train_thread = threading.Thread(target=train, args=(args, train_dataset, model, tokenizer))
+        #train_thread.start()
 
     if args.compute_dynamics:
-        # Setup logging
-        logging.basicConfig(
-            format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
-            datefmt="%m/%d/%Y %H:%M:%S",
-            level=logging.INFO
-        )
-        config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
-        ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
+        args.dynamics_ckpts_list = [5, 10, 15, 19]
+        compute_dynamics(args, train_dataset, tokenizer)
 
-        checkpoint_names = []
-        model_names = []
-        if os.path.isdir(ckpt_dir):
-            checkpoint_names = [fn for fn in os.listdir(ckpt_dir) if fn.startswith('checkpoint-')]
-        if len(checkpoint_names) > 0:
-            checkpoint_names = sorted(checkpoint_names, key=lambda p: int(p.split('-')[-1]))
-            for i, ckpt_name in enumerate(checkpoint_names):
-                model_names.append(os.path.join(ckpt_dir, ckpt_name))
-        else:
-            logger.warning('No checkpoint detected: %s', ckpt_dir)
-            return -1
-
-        # Get Tokenizer
-        if args.tokenizer_name:
-            tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name, cache_dir=args.cache_dir)
-            # BERT always needs lower cased tokens.
-            if 'uncased' in args.model_type:
-                assert tokenizer.init_kwargs.get("do_lower_case", False)
-        elif args.model_name_or_path:
-            tokenizer = tokenizer_class.from_pretrained(args.model_name_or_path, cache_dir=args.cache_dir)
-        else:
-            raise ValueError(
-                "You are instantiating a new {} tokenizer. This is not supported, "
-                "but you can do it from another script, save it,"
-                "and load it from here, using --tokenizer_name".format(tokenizer_class.__name__)
-            )
-        assert args.block_size <= tokenizer.model_max_length
-
-        # Get Config
-        if args.config_name:
-            config = config_class.from_pretrained(args.config_name, cache_dir=args.cache_dir)
-        elif args.model_name_or_path:
-            config = config_class.from_pretrained(args.model_name_or_path, cache_dir=args.cache_dir)
-        else:
-            raise ValueError(
-                "Why do you want the default config?? Please use --config_name or --model_name_or_path"
-            )
-        
-        data = load_train_data_from_hdf5(os.path.join(args.output_dir, "instances_masks.hdf5"))
-        instance_list = data['instance_order']
-        train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
-
-        #random.shuffle(instance_list)
-        #instance_list_comp = list(range(len(train_dataset)))
-        #random.shuffle(instance_list_comp)
-        #assert (instance_list == instance_list_comp[:len(instance_list)]).all()
-        #assert (instance_list_comp[len(instance_list):len(instance_list) + 256*96][0] not in instance_list)
-        
-        #instance_list = instance_list_comp[len(instance_list) + 5000: len(instance_list) + 5000 + 512*96]
-        #instance_list = instance_list[:512*96]
-
-        args.max_steps = len(instance_list) // args.eval_batch_size
-        args.logging_steps *= args.gradient_accumulation_steps
-        args.dynamics_path = os.path.join(args.output_dir, "dynamics_eval_rdm_masks.hdf5") if args.random_masks else os.path.join(args.output_dir, "dynamics_eval.hdf5") 
-
-        if not os.path.isfile(args.dynamics_path):
-            initialize_hdf5_file_eval(args.dynamics_path, args.max_steps * args.eval_batch_size,  len(model_names))
-        
-        eval_ckpts = list(range(len(model_names)))
-        for i in eval_ckpts:
-            if i >= args.first_dynamics_ckpt:
-                args.model_name_or_path = model_names[i]
-                print(f"Evaluating {args.model_name_or_path} for {args.max_steps} steps.")
-
-                model = model_class.from_pretrained(
-                    args.model_name_or_path,
-                    from_tf=bool(".ckpt" in args.model_name_or_path),
-                    config=config,
-                    cache_dir=args.cache_dir,
-                    args=args
-                )
-                model.to(args.device)
-
-                if args.random_masks:
-                    args.seed = random.randint(100, 1000000)
-                    print(args.seed)
-
-                evaluate_train(args, train_dataset, instance_list, i, model, tokenizer)
-    else:
-        model, tokenizer = get_model_tokenizer(args)
-        model.to(args.device)
-        # Training
-        if args.do_train:
-            train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
-            train(args, train_dataset, model, tokenizer)
-
-        # Evaluation
-        if args.do_eval:
-            result = evaluate(args, model, tokenizer)
+    if train_thread is not None:
+        train_thread.join()
 
 if __name__ == "__main__":
     main()
