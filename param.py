@@ -153,8 +153,8 @@ def process_args():
     parser.add_argument("--random_masks", action="store_true", help="Randomizes the masks used for generating data maps instead of using the same masks used for training.")
     parser.add_argument("--compute_dynamics", action="store_true", help="Compute dynamics from model checkpoint.")
 
-    parser.add_argument("--dynamics_path", default="data/dynamics/", type=str, help="Path to save the dynamics data.")
-    parser.add_argument("--first_dynamics_ckpt", default=0, type=int, help="The first checkpoint that should be evaluated for training dynamics.")
+    parser.add_argument("--dynamics_path", default="none", type=str, help="Path to save the dynamics data.")
+    parser.add_argument("--dynamics_ckpts_list", nargs='+', type=int, help="List containing the indices of the checkpoints that should be computed for the training dynamics.")
 
     parser.add_argument("--data_partition", default='none', type=str,
                         choices=['easy', 'ambiguous', 'hard', 'rand', 'none'],

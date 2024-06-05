@@ -2,7 +2,6 @@ tokenizer_name = bert-base-uncased
 model_type = bert
 block_size = 126
 
-do_train = True
 train_data_file = data/wiki-cased/en.train.raw
 train_data_file_bc = data/wiki-cased/en-bc.train.raw
 do_eval = True
@@ -13,11 +12,11 @@ shuffle = True
 mlm = True
 add_bc = True
 
+dynamics_ckpts_list = 1
+
 scheduler_type = one_cycle
 max_grad_norm = 0.5
 adam_epsilon = 1e-12
-
-first_dynamics_ckpt = 3
 
 train_batch_size = 96
 eval_batch_size = 96
@@ -28,7 +27,7 @@ learning_rate = 0.001
 weight_decay = 0.01 
 warmup_steps = 10000
 
-logging_steps = 64
-ckpt_steps = 512
+logging_steps = 8
+ckpt_steps = 128
 
 should_continue = True
