@@ -19,7 +19,7 @@ GPT and GPT-2 are fine-tuned using a causal language modeling (CLM) loss while B
 using a masked language modeling (MLM) loss.
 """
 
-
+import gc
 import argparse
 import glob
 import json
@@ -294,17 +294,40 @@ def make_plot_epoch2(args, instance_order, correctness_means, mean_confidences, 
 
 
 def process_dataset(data, instance_order, selected_instances, epochs, step_size):
-    mean_confidence = data['mean_confidence']
-    geom_mean_confidence = data['geom_mean_confidence']
-    correctness = data['correctness']
-
-    # Compute metrics
-    mean_confidences = epoch_mean(instance_order, mean_confidence, epochs, selected_instances, step_size)
-    geom_mean_confidences = epoch_mean(instance_order, geom_mean_confidence, epochs, selected_instances, step_size)
     
-    variabilities_mean = epoch_variability(instance_order, mean_confidence, epochs, selected_instances, step_size)
-    variabilities_geom_mean = epoch_variability(instance_order, geom_mean_confidence, epochs, selected_instances, step_size)
+    mean_confidences = np.array([])
+    variabilities_mean = np.array([])
+    mean_confidence = data['mean_confidence']
+    print("Calculating mean confidence.")
 
+    half = selected_instances[1] // 2
+    mean_confidences = np.concatenate((mean_confidences, epoch_mean(instance_order, mean_confidence, epochs, [0, half], step_size)), axis=0)
+    mean_confidences = np.concatenate((mean_confidences, epoch_mean(instance_order, mean_confidence, epochs, [half, selected_instances[1]], step_size)), axis=0)
+    
+    variabilities_mean = np.concatenate((variabilities_mean, epoch_variability(instance_order, mean_confidence, epochs, [0, half], step_size)), axis=0)
+    variabilities_mean = np.concatenate((variabilities_mean, epoch_variability(instance_order, mean_confidence, epochs, [half, selected_instances[1]], step_size)), axis=0)
+
+    del data['mean_confidence']
+    del mean_confidence
+    gc.collect()
+
+    geom_mean_confidences = np.array([])
+    variabilities_geom_mean = np.array([])
+
+    geom_mean_confidence = data['geom_mean_confidence']
+    print("Calculating geometric mean confidence.")
+    geom_mean_confidences = np.concatenate((geom_mean_confidences, epoch_mean(instance_order, geom_mean_confidence, epochs, [0, half], step_size)), axis=0)
+    variabilities_geom_mean = np.concatenate((variabilities_geom_mean, epoch_variability(instance_order, geom_mean_confidence, epochs, [0, half], step_size)), axis=0)
+
+    geom_mean_confidences = np.concatenate((geom_mean_confidences, epoch_mean(instance_order, geom_mean_confidence, epochs, [half, selected_instances[1]], step_size)), axis=0)
+    variabilities_geom_mean = np.concatenate((variabilities_geom_mean, epoch_variability(instance_order, geom_mean_confidence, epochs, [half, selected_instances[1]], step_size)), axis=0)
+
+    del data['geom_mean_confidence']
+    del geom_mean_confidence
+    gc.collect()
+
+    correctness = data['correctness']
+    print("Calculating correctness.")
     correctness_means = epoch_mean(instance_order, correctness, epochs, selected_instances, step_size)
 
     print(np.mean(correctness_means))
@@ -408,14 +431,46 @@ def eval(args):
     # make_plot_epoch(args, instance_order, results_eval['correctness_means'], results_eval_seed['correctness_means'], results_eval['mean_confidences'], results_eval_seed['mean_confidences'], results_eval['variabilities_mean'], results_eval_seed['variabilities_mean'])
     #make_plot_epoch(args, instance_order, results_eval['correctness_means'], results_eval_seed['correctness_means'], results_eval['geom_mean_confidences'], results_eval_seed['geom_mean_confidences'], results_eval['variabilities_geom_mean'], results_eval_seed['variabilities_geom_mean'])
 
+def plots(args):
+    data = extract_data_from_log("/home/robert/Documents/ETT/data/logs/train-log-full-12L.txt")
+    train_loss = data["train_loss"]
+    train_ppl = data["train_ppl"]
+    eval_ppl = data["eval_ppl"]
+    steps = data["train_step"]
+
+    # Calculate log perplexity using numpy's log function
+    log_train_ppl = np.log(train_ppl)
+    log_eval_ppl = np.log(eval_ppl)
+    
+    # Plot log train and log eval perplexity over steps
+    plt.figure(figsize=(10, 6))
+    plt.plot(steps, log_train_ppl, label='Log Train Perplexity')
+    plt.plot(steps, log_eval_ppl, label='Log Eval Perplexity')
+    plt.xlabel('Steps')
+    plt.ylabel('Log Perplexity')
+    plt.title('Train and Eval Log Perplexity over Steps')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig("/home/robert/Documents/ETT/data/logs/full_ppl_log") 
+
+    # Plot train loss over steps
+    plt.figure(figsize=(10, 6))
+    plt.plot(steps, train_loss, label='Train Loss', color='red')
+    plt.xlabel('Steps')
+    plt.ylabel('Train Loss')
+    plt.title('Train Loss over Steps')
+    plt.legend()
+    plt.grid(True)
+    #plt.savefig("/home/robert/Documents/ETT/data/logs/full-train_loss")
 
 def main():
     parser = process_args()
     args = parser.parse_args()
+    #data = load_train_data_from_hdf5(os.path.join(args.output_dir, "instances_masks.hdf5"))
+    #data_comp = load_train_data_from_hdf5(os.path.join(args.dynamics_path, "instances_masks.hdf5"))
+
     if args.compute_dynamics:
         compute_partitions(args)
-    else:
-        eval(args)
 
 
 if __name__ == "__main__":
