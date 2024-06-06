@@ -435,6 +435,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             break
         start_index = 0
         epochs_trained += 1
+        args.seed = epochs_trained
 
     tb_writer.close()
 
