@@ -336,6 +336,10 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     steps_per_epoch = len(instance_list) // (args.train_batch_size * args.gradient_accumulation_steps)
     start_index = (global_step % steps_per_epoch) * args.gradient_accumulation_steps
 
+    if args.data_partition in ['none', 'rand']:
+        instance_list = instance_list[start_index * args.train_batch_size:]
+        start_index = 0
+
     train_sampler = CustomSampler(instance_list)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, shuffle=False, num_workers=0,
                                   batch_size=args.train_batch_size, collate_fn=collate, pin_memory=True
@@ -349,7 +353,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         model.zero_grad()       # Support of accumulating gradients
 
         for step, batch in enumerate(epoch_iterator):
-
+            
             if step < start_index:
                 continue
 
