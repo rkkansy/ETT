@@ -34,7 +34,7 @@ from typing import Dict, List, Tuple
 from datetime import datetime
 import time
 from torch.cuda.amp import autocast, GradScaler
-from data import CustomSampler
+from data import CustomSampler, load_train_data_from_hdf5
 import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -97,8 +97,13 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
 
     epoch_size = args.train_batch_size * args.max_steps * args.gradient_accumulation_steps
-    instance_list = list(range(0, len(train_dataset)))
-    random.shuffle(instance_list)
+
+    if args.data_partition in ['none', 'rand']:
+        instance_list = list(range(0, len(train_dataset)))
+        random.shuffle(instance_list)
+    else:
+        instance_list  = load_train_data_from_hdf5(os.path.join(args.partition_data_path, f"{args.data_partition}.hdf5"))['instance_order']
+        
     instance_list = instance_list[:epoch_size]
 
     train_sampler = CustomSampler(instance_list)
