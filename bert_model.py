@@ -8,7 +8,7 @@ from typing import Optional, Tuple
 import torch
 import torch.utils.checkpoint
 from torch import nn
-from torch.nn import CrossEntropyLoss, MSELoss
+from torch.nn import CrossEntropyLoss, MSELoss, BCEWithLogitsLoss
 
 from transformers.activations import ACT2FN
 from transformers.file_utils import (
@@ -42,6 +42,7 @@ from flop_computation import get_flops_computer
 
 logger = logging.get_logger(__name__)
 
+_CHECKPOINT_FOR_DOC = "bert-base-uncased"
 _CONFIG_FOR_DOC = "BertConfig"
 _TOKENIZER_FOR_DOC = "BertTokenizer"
 
@@ -957,20 +958,43 @@ class BertForMaskedLM(BertPreTrainedModel):
 
         return {"input_ids": input_ids, "attention_mask": attention_mask}
 
+
 class BertForSequenceClassificationPreNorm(BertPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
-        self.bert = BertModel(config)
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-        self.regression = True if config.num_labels == 1 else False
-        if self.regression:
-            self.loss_fct = MSELoss()
-        else:
-            self.loss_fct = CrossEntropyLoss()
+        self.num_labels = config.num_labels
+        self.config = config
 
-    def forward(self, input_ids=None, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None, inputs_embeds=None, labels=None, return_dict=None):
+        self.bert = BertModel(config)
+        classifier_dropout = (
+            config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
+        )
+        self.dropout = nn.Dropout(classifier_dropout)
+        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+
+        self.init_weights()
+
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        r"""
+        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
+            Labels for computing the sequence classification/regression loss. Indices should be in :obj:`[0, ...,
+            config.num_labels - 1]`. If :obj:`config.num_labels == 1` a regression loss is computed (Mean-Square loss),
+            If :obj:`config.num_labels > 1` a classification loss is computed (Cross-Entropy).
+        """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        
+
         outputs = self.bert(
             input_ids,
             attention_mask=attention_mask,
@@ -978,40 +1002,45 @@ class BertForSequenceClassificationPreNorm(BertPreTrainedModel):
             position_ids=position_ids,
             head_mask=head_mask,
             inputs_embeds=inputs_embeds,
-            return_dict=return_dict
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
         )
-        
-        sequence_output = outputs[0]  # the first element is 'last_hidden_state'
-        pooled_output = sequence_output[:, 0]  # use the first token for classification/regression
-        
+
+        pooled_output = outputs[1]
+
+        pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output)
-        
-        # Squeeze logits to match labels for regression task (stsb)
-        if self.regression:
-            logits = logits.squeeze(-1)
-        
+
         loss = None
         if labels is not None:
-            if self.regression:
-                # Ensure labels are floats for regression
-                labels = labels.float()
-            else:
-                # Ensure labels are long ints for classification
-                labels = labels.long()
-                logits = logits.view(-1, self.config.num_labels)  # Reshape for classification
-                labels = labels.view(-1)
+            if self.config.problem_type is None:
+                if self.num_labels == 1:
+                    self.config.problem_type = "regression"
+                elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
+                    self.config.problem_type = "single_label_classification"
+                else:
+                    self.config.problem_type = "multi_label_classification"
 
-            loss = self.loss_fct(logits, labels)
-
+            if self.config.problem_type == "regression":
+                loss_fct = MSELoss()
+                if self.num_labels == 1:
+                    loss = loss_fct(logits.squeeze(), labels.squeeze())
+                else:
+                    loss = loss_fct(logits, labels)
+            elif self.config.problem_type == "single_label_classification":
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            elif self.config.problem_type == "multi_label_classification":
+                loss_fct = BCEWithLogitsLoss()
+                loss = loss_fct(logits, labels)
         if not return_dict:
-            return (logits,) + outputs[2:] if loss is None else (loss, logits) + outputs[2:]
+            output = (logits,) + outputs[2:]
+            return ((loss,) + output) if loss is not None else output
 
-        if self.regression:
-            logits = logits.unsqueeze(-1)
-            
         return SequenceClassifierOutput(
             loss=loss,
             logits=logits,
-            hidden_states=outputs.hidden_states if return_dict else None,
-            attentions=outputs.attentions if return_dict else None
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
         )
