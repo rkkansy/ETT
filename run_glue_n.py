@@ -54,7 +54,8 @@ from transformers import (
     set_seed,
     get_linear_schedule_with_warmup,
     AdamW,
-    get_polynomial_decay_schedule_with_warmup
+    get_polynomial_decay_schedule_with_warmup,
+    get_cosine_schedule_with_warmup
 )
 from transformers.integrations import WandbCallback
 from transformers.trainer_utils import SchedulerType, is_main_process
@@ -62,25 +63,6 @@ from transformers.trainer_utils import SchedulerType, is_main_process
 
 from clearml import Task
 import argparse
-
-parser = argparse.ArgumentParser(add_help=False)
-parser.add_argument('--run_name')
-parser.add_argument('--log_group')
-args, _ = parser.parse_known_args()
-run_name = vars(args)['run_name']
-group = vars(args)['log_group']
-
-Task.set_credentials(
-            api_host="http://35.223.63.40:8008", 
-            web_host="http://35.223.63.40:8080", 
-            files_host="http://35.223.63.40:8081", 
-            key='VJ9XKRTX42WZQG6NRFG6', 
-            secret='vvugyeM2Jd7AWCkONYpZdB7f25kbwczqbClrjTh1Sei0Fpinu9')
-# task = Task.set_offline()
-Task.set_offline(offline_mode=True)
-task = Task.init(project_name=f'master thesis/{group}', task_name=run_name)
-# task.set_offline()
-clearml_logger = task.get_logger()
 
 
 task_to_keys = {
@@ -234,6 +216,7 @@ def main():
             f"Output directory ({training_args.output_dir}) already exists and is not empty. "
             "Use --overwrite_output_dir to overcome."
         )
+    print(training_args)
 
     # Setup logging
     logging.basicConfig(
@@ -319,6 +302,7 @@ def main():
             finetuning_task=data_args.task_name,
             cache_dir=model_args.cache_dir,
         )
+        print(config)
         tokenizer = AutoTokenizer.from_pretrained(
             model_args.tokenizer_name
             if model_args.tokenizer_name
@@ -497,7 +481,13 @@ def main():
     rounded_steps = int(math.ceil(total_steps / 10.0)) * 10
     warmup_steps = round(rounded_steps * training_args.warmup_ratio)
     optimizer = AdamW(model.parameters(), training_args.learning_rate)
-    scheduler = get_polynomial_decay_schedule_with_warmup(optimizer, warmup_steps, rounded_steps)
+    if training_args.lr_scheduler_type == 'polynomial':
+        scheduler = get_polynomial_decay_schedule_with_warmup(optimizer, warmup_steps, rounded_steps)
+    elif training_args.lr_scheduler_type == 'cosine':
+        scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, rounded_steps)
+    elif training_args.lr_scheduler_type == 'linear':
+        scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, rounded_steps)
+        
     # Initialize our Trainer
     trainer = Trainer(
         model=model,
