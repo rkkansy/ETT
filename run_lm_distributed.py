@@ -352,10 +352,9 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         t_start = time.time()
         model.zero_grad()       # Support of accumulating gradients
 
+        print(f"Epochs trained: {epochs_trained} | Seed: {args.seed}")
+
         for step, batch in enumerate(epoch_iterator):
-            
-            if step < start_index:
-                continue
 
             inputs, labels, _ = mask_tokens(batch, tokenizer, args)
             inputs = inputs.to(args.device)
@@ -437,10 +436,14 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         if args.max_steps > 0 and global_step >= args.max_steps:
             epoch_iterator.close()
             break
-        start_index = 0
-        epochs_trained += 1
-        args.seed = epochs_trained
-
+        
+        # Always end after single epoch
+        checkpoint_name = f"checkpoint-{global_step:08d}"
+        ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
+        os.makedirs(ckpt_dir, exist_ok=True)
+        save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler, scaler)
+        break
+    
     tb_writer.close()
 
 def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix=""):
