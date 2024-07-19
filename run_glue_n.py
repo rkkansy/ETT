@@ -20,6 +20,7 @@ from sched import scheduler
 from torch.optim import Adam, AdamW
 import wandb
 import math
+from torch.nn.utils import clip_grad_norm_
 
 import json
 import logging
@@ -60,8 +61,6 @@ from transformers import (
 from transformers.integrations import WandbCallback
 from transformers.trainer_utils import SchedulerType, is_main_process
 
-
-from clearml import Task
 import argparse
 
 
@@ -87,7 +86,6 @@ class PrinterCallback(TrainerCallback):
         wandb.log({"lr": lr}, step = step)
         # clearml_logger.report_scalar("train", "lr", iteration=step ,value=lr)
         pass
-
     
 @dataclass
 class DataTrainingArguments:
@@ -188,7 +186,6 @@ class FinetuneTrainingArguments(TrainingArguments):
     )
     warmup_ratio: Optional[float] = field(default=0. , metadata={"help": "warmup ratio."})  
     total_steps: Optional[int] = field(default=123873, metadata={'help': "total num of update steps"})
-    log_group:  Optional[str] = field(default=None, metadata={"help": "clearml group name"})
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -480,7 +477,7 @@ def main():
     total_steps = len(train_dataset) * training_args.num_train_epochs / training_args.train_batch_size
     rounded_steps = int(math.ceil(total_steps / 10.0)) * 10
     warmup_steps = round(rounded_steps * training_args.warmup_ratio)
-    optimizer = AdamW(model.parameters(), training_args.learning_rate)
+    optimizer = AdamW(model.parameters(), training_args.learning_rate, weight_decay=training_args.weight_decay)
     if training_args.lr_scheduler_type == 'polynomial':
         scheduler = get_polynomial_decay_schedule_with_warmup(optimizer, warmup_steps, rounded_steps)
     elif training_args.lr_scheduler_type == 'cosine':
