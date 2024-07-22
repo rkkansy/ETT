@@ -274,7 +274,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     else:
         raise ValueError(f"Unknow lr scheduler: {args.scheduler_type}")
 
-    scaler = GradScaler()
+    scaler = GradScaler(init_scale=args.init_grad_scale)
 
     # Check if saved optimizer or scheduler states exist
     if (args.model_name_or_path and os.path.isfile(os.path.join(args.model_name_or_path, "optimizer.pt")) 

@@ -141,7 +141,7 @@ def process_args():
 
     # Scheduler
     parser.add_argument("--scheduler_type", default='linear', type=str, help="Type of lr scheduler.", choices=['linear', 'cosine', 'poly', 'one_cycle'])
-    parser.add_argument("--scheduler_cosine_cycles", default=0.5, type=float, help="Number of cycles for cosine lr scheduler.")
+    parser.add_argument("--scheduler_cosine_cycles", default=1.0, type=float, help="Number of cycles for cosine lr scheduler.")
     parser.add_argument("--scheduler_poly_power", default=1.0, type=float, help="Power of polynomial lr scheduler.")
 
     # Distributed Training
@@ -164,6 +164,7 @@ def process_args():
                         help="Path to computed dynamics."
     )
     # Half Precision
+    parser.add_argument("--init_grad_scale", default=65536.0, type=float, help="Inital factor for scaling gradients.")
     parser.add_argument(
         "--fp16", action="store_true",
         help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit",)
