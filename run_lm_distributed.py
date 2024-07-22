@@ -630,7 +630,7 @@ def compute_dynamics(args, train_dataset, tokenizer):
 
         args.max_steps = len(instance_list) // args.eval_batch_size
         args.logging_steps *= args.gradient_accumulation_steps
-        args.output_dir = os.path.join(args.output_dir, "dynamics_eval_rdm_masks.hdf5") if args.random_masks else os.path.join(args.output_dir, "dynamics_eval.hdf5") 
+        args.output_dir = os.path.join(args.output_dir, "dynamics_eval_rdm_masks.hdf5") if args.random_masks else os.path.join(args.output_dir, f"dynamics_eval_{args.seed}.hdf5") 
 
         if not os.path.isfile(args.output_dir):
             initialize_hdf5_file_eval(args.output_dir, args.max_steps * args.eval_batch_size,  len(model_names))
@@ -767,6 +767,7 @@ def get_model_tokenizer(args):
         logger.info("Training new model from scratch")
         model = model_class(config=config, args=args)
 
+    print(model)
     return model, tokenizer
 
 def main():
