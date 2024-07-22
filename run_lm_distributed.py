@@ -435,6 +435,10 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
         if args.max_steps > 0 and global_step >= args.max_steps:
             epoch_iterator.close()
+            checkpoint_name = f"checkpoint-{global_step:08d}"
+            ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
+            os.makedirs(ckpt_dir, exist_ok=True)
+            save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler, scaler)
             break
         
         # Always end after single epoch
