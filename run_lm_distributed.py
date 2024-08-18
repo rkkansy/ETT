@@ -317,7 +317,8 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
         os.makedirs(ckpt_dir, exist_ok=True)
         save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler, scaler)
-
+        if args.get_dynamics:
+            initialize_hdf5_file_train(os.path.join(args.output_dir, "single_dynamics.hdf5"), epoch_size)
         if args.data_partition in ['none', 'rand']:
             instance_list = list(range(0, len(train_dataset)))
         else:
@@ -344,6 +345,11 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, shuffle=False, num_workers=0,
                                   batch_size=args.train_batch_size, collate_fn=collate, pin_memory=True
     )
+    mean_confidence = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
+    mean_entropy = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
+
+    save_thread = None
+
     while True:
         epoch_iterator = tqdm(train_dataloader, 
                               desc=f"Steps trained: {global_step:06d}", 
@@ -355,7 +361,6 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         print(f"Epochs trained: {epochs_trained} | Seed: {args.seed}")
 
         for step, batch in enumerate(epoch_iterator):
-
             inputs, labels, _ = mask_tokens(batch, tokenizer, args)
             inputs = inputs.to(args.device)
             labels = labels.to(args.device)
@@ -373,6 +378,31 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                     current_step=global_step)
             
                 loss = outputs['loss']  # model outputs are always tuple in transformers (see doc)
+
+                if args.get_dynamics:
+
+                    insert_idx = (step % args.logging_steps) * args.train_batch_size 
+                    insert_idx_batch = insert_idx + args.train_batch_size
+
+                    logits = outputs['logits']
+                    softmax_logits = torch.softmax(logits, dim=-1)  
+
+                    valid_labels_mask = labels != -100
+                    valid_labels_mask_float = valid_labels_mask.float()
+                    total_considered_per_instance = torch.sum(valid_labels_mask_float, dim=1)
+                    total_considered_per_instance = total_considered_per_instance.masked_fill_(total_considered_per_instance == 0, 1.)
+                    labels_adjusted = labels.clone()
+                    labels_adjusted[~valid_labels_mask] = 0 
+
+                    correct_token_probs = torch.gather(softmax_logits, dim=-1, index=labels_adjusted.unsqueeze(-1))
+                    log_probs = torch.log(softmax_logits + 1e-7) 
+                    entropy = -torch.sum(softmax_logits * log_probs, dim=-1)
+
+                    mean_probs = torch.sum(correct_token_probs.squeeze(-1) * valid_labels_mask_float, dim=1) / total_considered_per_instance
+                    mean_entr = torch.sum(entropy * valid_labels_mask_float, dim=1) / total_considered_per_instance
+                    
+                    mean_entropy[insert_idx : insert_idx_batch] = mean_entr.detach().cpu().numpy()
+                    mean_confidence[insert_idx : insert_idx_batch] = mean_probs.detach().cpu().numpy()
 
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
@@ -396,6 +426,20 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                 global_step += 1
                 
                 if args.logging_steps > 0 and global_step % args.logging_steps == 0:
+                    
+                    if args.get_dynamics:
+                        if save_thread is not None:
+                            save_thread.join()
+
+                        offset = (step + 1 - args.logging_steps * args.gradient_accumulation_steps) * args.train_batch_size
+                        
+                        mean_confidence_copy = mean_confidence.copy()
+                        mean_entropy_copy = mean_entropy.copy()
+
+                        save_thread = threading.Thread(target=add_confidence_batch, 
+                                                    args=(args, os.path.join(args.output_dir, "single_dynamics.hdf5"), offset, mean_confidence_copy, mean_entropy_copy))
+                        save_thread.start()
+                    
 
                     t_elapse = time.time() - t_start
 
@@ -501,8 +545,8 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
             # Calculate correctness per instance
             predicted_token_ids = torch.argmax(logits, dim=-1)
             correct_predictions_mask = (predicted_token_ids == labels) & valid_labels_mask
-            correct_predictions_per_instance = correct_predictions_mask.sum(dim=1).float()
-            total_considered_per_instance = valid_labels_mask_float.sum(dim=1)
+            correct_predictions_per_instance = torch.sum(correct_predictions_mask.float(), dim=1)
+            total_considered_per_instance = torch.sum(valid_labels_mask_float, dim=1)
 
             # Avoid division by 0 in case no words are masked
             total_considered_per_instance = total_considered_per_instance.masked_fill_(total_considered_per_instance == 0, 1.)
@@ -514,7 +558,7 @@ def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrain
             correct_token_probs = torch.gather(softmax_logits, dim=-1, index=labels_adjusted.unsqueeze(-1))
 
             # Calculate mean confidence
-            sum_probs = torch.sum(correct_token_probs.squeeze(-1) * valid_labels_mask, dim=1)
+            sum_probs = torch.sum(correct_token_probs.squeeze(-1) * valid_labels_mask_float, dim=1)
             mean_probs = sum_probs / total_considered_per_instance
 
             # Calculate geometric mean in log-space to mitigate underflow
