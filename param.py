@@ -141,7 +141,7 @@ def process_args():
 
     # Scheduler
     parser.add_argument("--scheduler_type", default='linear', type=str, help="Type of lr scheduler.", choices=['linear', 'cosine', 'poly', 'one_cycle'])
-    parser.add_argument("--scheduler_cosine_cycles", default=1.0, type=float, help="Number of cycles for cosine lr scheduler.")
+    parser.add_argument("--scheduler_cosine_cycles", default=0.5, type=float, help="Number of cycles for cosine lr scheduler.")
     parser.add_argument("--scheduler_poly_power", default=1.0, type=float, help="Power of polynomial lr scheduler.")
 
     # Distributed Training
@@ -152,6 +152,7 @@ def process_args():
     # Training Dynamics
     parser.add_argument("--random_masks", action="store_true", help="Randomizes the masks used for generating data maps instead of using the same masks used for training.")
     parser.add_argument("--compute_dynamics", action="store_true", help="Compute dynamics from model checkpoint.")
+    parser.add_argument("--get_dynamics", action="store_true", help="Compute dynamics from model checkpoint.")
 
     parser.add_argument("--dynamics_path", default="none", type=str, help="Path to save the dynamics data.")
     parser.add_argument("--dynamics_ckpts_list", nargs='+', type=int, help="List containing the indices of the checkpoints that should be computed for the training dynamics.")

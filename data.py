@@ -79,6 +79,12 @@ def initialize_hdf5_file_eval(filename, data_size, eval_iterations):
         f.create_dataset("geom_mean_confidence", shape=(data_size, eval_iterations), dtype=np.float32)
         f.create_dataset("correctness", shape=(data_size, eval_iterations), dtype=np.float32)
             
+def initialize_hdf5_file_train(filename, data_size):
+
+    with h5py.File(filename, 'w') as f:
+        f.create_dataset("mean_confidence", shape=(data_size), dtype=np.float32)
+        f.create_dataset("mean_entropy", shape=(data_size), dtype=np.float32)
+
 def async_add_probs_batch(args, filename, offset, correctness, mean_probs, geom_mean_probs, eval_epoch=0):
 
     with h5py.File(filename, 'a') as f: 
@@ -89,6 +95,17 @@ def async_add_probs_batch(args, filename, offset, correctness, mean_probs, geom_
     
     print()
     print(f"Finished saving data for step: {eval_epoch}: {offset // args.eval_batch_size} - {args.logging_steps + offset // args.eval_batch_size}")
+
+def add_confidence_batch(args, filename, offset, mean_probs, mean_entropy):
+
+    with h5py.File(filename, 'a') as f: 
+        for i in range(len(mean_probs)):
+            f["mean_confidence"][i + offset] = mean_probs[i]
+            f["mean_entropy"][i + offset] = mean_entropy[i]
+    
+    print()
+    print(f"Finished saving data: {offset // args.train_batch_size} - {args.logging_steps * args.gradient_accumulation_steps + offset // args.train_batch_size}")
+
 
 class CoLDataset(Dataset):
     IGNORE_ID = -100
