@@ -324,7 +324,9 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         else:
             instance_list  = load_train_data_from_hdf5(os.path.join(args.partition_data_path, f"{args.data_partition}.hdf5"))['instance_order']
 
-        random.shuffle(instance_list)
+        if args.shuffle:
+            random.shuffle(instance_list)
+            
         if epoch_size < len(instance_list):
             instance_list = instance_list[:epoch_size]
     
