@@ -66,6 +66,18 @@ def load_eval_data_from_hdf5(file_path):
         data['correctness'] = f['correctness'][:]   
     
     return data
+
+def load_eval_s_data_from_hdf5(file_path):
+                         
+    data = {
+        "mean_confidence" : [],
+        "mean_entropy": []
+    }
+    with h5py.File(file_path, 'r') as f:
+        data['mean_confidence'] = f['mean_confidence'][:]
+        data['mean_entropy'] = f['mean_entropy'][:]
+    
+    return data
     
 def initialize_hdf5_file(filename, instance_list):
 
