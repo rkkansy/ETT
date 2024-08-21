@@ -158,7 +158,7 @@ def process_args():
     parser.add_argument("--dynamics_ckpts_list", nargs='+', type=int, help="List containing the indices of the checkpoints that should be computed for the training dynamics.")
 
     parser.add_argument("--data_partition", default='none', type=str,
-                        choices=['easy', 'ambiguous', 'hard', 'rand', 'none', 'entropy'],
+                        choices=['easy', 'ambiguous', 'hard', 'rand', 'none', 'entropy', 'confidence', 'entropy_rev', 'confidence_rev'],
                         help="Which part of the data should be used for training. Requires training dynamics to be computed."
     )
     parser.add_argument("--partition_data_path", default="", type=str,
