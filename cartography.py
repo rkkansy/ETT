@@ -18,6 +18,7 @@ Fine-tuning the library models for language modeling on a text file (GPT, GPT-2,
 GPT and GPT-2 are fine-tuned using a causal language modeling (CLM) loss while BERT and RoBERTa are fine-tuned
 using a masked language modeling (MLM) loss.
 """
+from scipy.interpolate import interp1d
 
 import gc
 import argparse
@@ -380,96 +381,304 @@ def compute_partitions(args):
     initialize_hdf5_file(os.path.join(args.partition_data_path, "hard.hdf5"), mean_hard_instances)
     initialize_hdf5_file(os.path.join(args.partition_data_path, "ambiguous.hdf5"), mean_ambiguous_instances)
 
+def get_percent_indices(confidences, percent):
+    num_elements = int(len(confidences) * (percent / 100))
+    sorted_indices = np.argsort(confidences)
+    return sorted_indices[:num_elements], sorted_indices[-num_elements:]
+
+def compare_dynamics(args):
+    model_path_first = "/project/data/models/BERT-6L-512H-10k"
+    model_path_second = "/project/data/models/BERT-6L-512H-10k-20k"
+
+    data_train_first = load_train_data_from_hdf5(os.path.join(model_path_first, "instances_masks.hdf5"))
+    data_train_second = load_train_data_from_hdf5(os.path.join(model_path_second, "instances_masks.hdf5"))
+
+    data_eval_first_seen = load_eval_data_from_hdf5(os.path.join(model_path_first, "dynamics_eval_42.hdf5"))
+    data_eval_second_seen = load_eval_data_from_hdf5(os.path.join(model_path_second, "dynamics_eval_42.hdf5"))
+    
+    data_eval_first_unseen = load_eval_data_from_hdf5(os.path.join(model_path_first, "dynamics_eval_unseen_42.hdf5"))
+    data_eval_second_unseen = load_eval_data_from_hdf5(os.path.join(model_path_second, "dynamics_eval_unseen_42.hdf5"))
+    
+    instance_order_first = data_train_first['instance_order']
+    instance_order_second = data_train_second['instance_order']
+
+    mean_confidence_first_seen = data_eval_first_seen['mean_confidence'][-1]
+    mean_confidence_first_unseen = data_eval_first_unseen['mean_confidence'][-1]
+ 
+    mean_confidence_second_seen = data_eval_second_seen['mean_confidence'][-1]
+    mean_confidence_second_unseen = data_eval_second_unseen['mean_confidence'][-1]
+
+    # 1. Comparing instance orders
+    shared_instances = np.intersect1d(instance_order_first, instance_order_second)
+    print(f"Shared instances between Model 1 and Model 2: {len(shared_instances)}")
+
+    # 2. Confidence scores comparison
+    print("Mean confidence on seen data (Model 1):", np.mean(mean_confidence_first_seen))
+    print("Mean confidence on unseen data (Model 1):", np.mean(mean_confidence_first_unseen))
+    print("Mean confidence on seen data (Model 2):", np.mean(mean_confidence_second_seen))
+    print("Mean confidence on unseen data (Model 2):", np.mean(mean_confidence_second_unseen))
+
+    # Analyze top and bottom 10, 20, 30 percent
+    for frac in [10, 20, 30, 40, 50]:
+
+        print(f"\n--- Comparing top and bottom {frac}% instances ---")
+
+        # Model 1 Seen Data
+        bottom_indices, top_indices = get_percent_indices(mean_confidence_first_seen, frac)
+        top_instances_first_seen = set(instance_order_first[top_indices])
+        bottom_instances_first_seen = set(instance_order_first[bottom_indices])
+
+        # Model 1 Unseen Data
+        bottom_indices, top_indices = get_percent_indices(mean_confidence_first_unseen, frac)
+        top_instances_first_unseen = set(instance_order_second[top_indices])
+        bottom_instances_first_unseen = set(instance_order_second[bottom_indices])
+        
+        # Model 2 Seen Data
+        bottom_indices, top_indices = get_percent_indices(mean_confidence_second_seen, frac)
+        top_instances_second_seen = set(instance_order_second[top_indices])
+        bottom_instances_second_seen = set(instance_order_second[bottom_indices])
+
+        # Model 2 Unseen Data
+        bottom_indices, top_indices = get_percent_indices(mean_confidence_second_unseen, frac)
+        top_instances_second_unseen = set(instance_order_first[top_indices])
+        bottom_instances_second_unseen = set(instance_order_first[bottom_indices])
+
+        # Calculate and print intersections
+        print(f"Intersection of top {frac}% between Model 1 Seen and Model 2 Seen: {len(top_instances_first_seen & top_instances_second_unseen)} / {len(top_instances_first_seen)}")
+        print(f"Intersection of bottom {frac}% between Model 1 Seen and Model 2 Seen: {len(bottom_instances_first_seen & bottom_instances_second_unseen)} / {len(top_instances_first_seen)}")
+        
+        print(f"Intersection of top {frac}% between Model 1 Unseen and Model 2 Unseen: {len(top_instances_first_unseen & top_instances_second_seen)} / {len(top_instances_first_seen)}")
+        print(f"Intersection of bottom {frac}% between Model 1 Unseen and Model 2 Unseen: {len(bottom_instances_first_unseen & bottom_instances_second_seen)} / {len(top_instances_first_seen)}")
+        print()
 
 def eval(args):
     set_seed(args)  # Added here for reproducibility
-    three_layer_path = "/home/robert/Documents/ETT/models/BERT-3L-512H-122k"
+    model_path = "/project/data/models/BERT-6L-512H-10k-step-dyn"
 
-    six_layer_path = "/home/robert/Documents/ETT/models/BERT-6L-768H-122k"
+    data_eval = load_eval_s_data_from_hdf5(os.path.join(model_path, "single_dynamics.hdf5"))
 
-    data_eval = load_eval_data_from_hdf5(os.path.join(three_layer_path, "dynamics_eval.hdf5"))
-    data_eval_seed = load_eval_data_from_hdf5(os.path.join(six_layer_path, "dynamics_eval.hdf5"))
-
-    data_train = load_train_data_from_hdf5(os.path.join(args.output_dir, "instances_masks.hdf5"))
-
-    proc_data = data_eval
+    data_train = load_train_data_from_hdf5(os.path.join(model_path, "instances_masks.hdf5"))
     # Extract relevant metrics from synchronous evaluation data
     instance_order = data_train['instance_order']
-    epochs1 = [12, 13, 14, 15]
-    epochs2 = [1, 2, 3]
-    results_eval = process_dataset(data_eval, instance_order, epochs1)
-    results_eval_seed = process_dataset(data_eval_seed, instance_order, epochs2)
 
-    for i in range(4):
-        print(i, data_eval_seed['mean_confidence'][0][i])
+    for i in range(0, len(data_eval['mean_entropy']), 10000):
+        print(i, data_eval['mean_confidence'][i])
+        print(i, data_eval['mean_entropy'][i])
 
-    mean_confidences_top_indices = select_top_indices(results_eval['mean_confidences'])
-    seed_mean_confidences_top_indices = select_top_indices(results_eval_seed['mean_confidences'])
+    confidence = data_eval['mean_confidence']
+    entropy = data_eval['mean_entropy']
 
-    variabilities_mean_top_indices = select_top_indices(results_eval['variabilities_mean'])
-    variabilities_seed_mean_top_indices = select_top_indices(results_eval_seed['variabilities_mean'])
+    mean_confidences_top_indices = select_top_indices(confidence)
+    mean_entropy_top_indices = select_top_indices(entropy)
 
-    mean_confidences_bottom_indices = select_bottom_indices(results_eval['mean_confidences'])
-    seed_mean_confidences_bottom_indices = select_bottom_indices(results_eval_seed['mean_confidences'])
+    mean_confidences_bottom_indices = select_bottom_indices(confidence)
+    mean_entropy_bottom_indices = select_bottom_indices(entropy)
 
     mean_easy_instances = instance_order[mean_confidences_top_indices]
-    seed_mean_easy_instances = instance_order[seed_mean_confidences_top_indices]
+    seed_mean_easy_instances = instance_order[mean_entropy_top_indices]
 
     mean_hard_instances = instance_order[mean_confidences_bottom_indices]
-    seed_mean_hard_instances = instance_order[seed_mean_confidences_bottom_indices]
+    mean_entropy_hard_instances = instance_order[mean_entropy_bottom_indices]
 
-    mean_ambiguous_instances = instance_order[variabilities_mean_top_indices]
-    seed_mean_ambiguous_instances = instance_order[variabilities_seed_mean_top_indices]
+    mini_batch_size = 96
+    gradient_acc = 16
+    batch_size = mini_batch_size * gradient_acc
 
-    print("Easy: ",compare_indices(mean_easy_instances, seed_mean_easy_instances)['percent_common'])
-    print()
-    print("Ambig: ",compare_indices(mean_ambiguous_instances, seed_mean_ambiguous_instances)['percent_common'])
-    print()
-    print("Hard: ",compare_indices(mean_hard_instances, seed_mean_hard_instances)['percent_common'])
+    sorted_confidence_batches = []
+    sorted_entropy_batches = []
 
-    
-    # make_plot_epoch(args, instance_order, results_eval['correctness_means'], results_eval_seed['correctness_means'], results_eval['mean_confidences'], results_eval_seed['mean_confidences'], results_eval['variabilities_mean'], results_eval_seed['variabilities_mean'])
-    #make_plot_epoch(args, instance_order, results_eval['correctness_means'], results_eval_seed['correctness_means'], results_eval['geom_mean_confidences'], results_eval_seed['geom_mean_confidences'], results_eval['variabilities_geom_mean'], results_eval_seed['variabilities_geom_mean'])
+    total_steps = len(data_eval['mean_confidence']) // batch_size
 
-def plots(args):
-    data = extract_data_from_log("/home/robert/Documents/ETT/data/logs/train-log-full-12L.txt")
-    train_loss = data["train_loss"]
-    train_ppl = data["train_ppl"]
-    eval_ppl = data["eval_ppl"]
-    steps = data["train_step"]
+    print(total_steps)
 
-    # Calculate log perplexity using numpy's log function
-    log_train_ppl = np.log(train_ppl)
-    log_eval_ppl = np.log(eval_ppl)
-    
-    # Plot log train and log eval perplexity over steps
+    for i in range(total_steps):
+        sorted_confidence_batches.append(np.argsort(confidence[i * batch_size : (i + 1) * batch_size]))
+        sorted_entropy_batches.append(np.argsort(entropy[i * batch_size : (i + 1) * batch_size]))
+
+    sorted_confidence = []
+    sorted_entropy = []
+    for i in range(batch_size):
+        for j in range(total_steps):
+            sorted_confidence.append(sorted_confidence_batches[j][i] + j * batch_size)
+            sorted_entropy.append(sorted_entropy_batches[j][i] + j * batch_size)
+
+    plot_confidence_sorted = []
+    plot_confidence = []
+    plot_entropy_sorted = []
+    plot_entropy = []
+
+    for i in range(total_steps):
+        plot_confidence_sorted.append(confidence[sorted_confidence[i * batch_size]])
+        plot_entropy_sorted.append(entropy[sorted_entropy[i * batch_size]])
+        
+        print("confidence: " , confidence[sorted_confidence[i * batch_size]])
+        print("Index: " , sorted_confidence[i * batch_size])
+
+        print("entropy: " , entropy[sorted_entropy[i * batch_size]])
+        print("Index: " , sorted_entropy[i * batch_size])
+        print()
+        plot_confidence.append(confidence[i * batch_size])
+        plot_entropy.append(entropy[i * batch_size])
+
     plt.figure(figsize=(10, 6))
-    plt.plot(steps, log_train_ppl, label='Log Train Perplexity')
-    plt.plot(steps, log_eval_ppl, label='Log Eval Perplexity')
+    plt.plot(range(total_steps), plot_confidence, label='confidence')
+    plt.plot(range(total_steps), plot_confidence_sorted, label='confidence sorted')
     plt.xlabel('Steps')
-    plt.ylabel('Log Perplexity')
+    plt.ylabel('Confidence')
     plt.title('Train and Eval Log Perplexity over Steps')
     plt.legend()
     plt.grid(True)
-    plt.savefig("/home/robert/Documents/ETT/data/logs/full_ppl_log") 
+    plt.savefig("/project/data/models/BERT-6L-512H-10k-step-dyn/confidence") 
 
-    # Plot train loss over steps
     plt.figure(figsize=(10, 6))
-    plt.plot(steps, train_loss, label='Train Loss', color='red')
+    plt.plot(range(total_steps), plot_entropy, label='entropy')
+    plt.plot(range(total_steps), plot_entropy_sorted, label='entropy sorted')
     plt.xlabel('Steps')
-    plt.ylabel('Train Loss')
-    plt.title('Train Loss over Steps')
+    plt.ylabel('entropy')
+    plt.title('Train and Eval Log Perplexity over Steps')
     plt.legend()
     plt.grid(True)
-    #plt.savefig("/home/robert/Documents/ETT/data/logs/full-train_loss")
+    plt.savefig("/project/data/models/BERT-6L-512H-10k-step-dyn/entropy")
+
+    
+def sample_evenly(data, target_length):
+    data = np.array(data)
+    indices = np.linspace(0, len(data) - 1, target_length, dtype=int)
+    return data[indices]
+
+def plots(args):
+    # Load data from log files
+    data_easy = extract_data_from_log("/home/robert/Documents/ETT/data/logs/results/third_easy.txt")
+    data_ambig = extract_data_from_log("/home/robert/Documents/ETT/data/logs/results/third_amb.txt")
+    data_hard = extract_data_from_log("/home/robert/Documents/ETT/data/logs/results/third_hard.txt")
+
+    # Extract training loss and steps from each dataset
+    #train_loss_easy, steps_easy = sample_evenly(data_easy["train_loss"], 152), sample_evenly(data_easy["train_step"], 152)
+    #train_loss_ambig, steps_ambig = sample_evenly(data_ambig["train_loss"], 152), sample_evenly(data_ambig["train_step"], 152)
+    #train_loss_hard, steps_hard = sample_evenly(data_hard["train_loss"], 152), sample_evenly(data_hard["train_step"], 152)
+
+    train_loss_easy, steps_easy = data_easy["train_loss"], data_easy["train_step"]
+    train_loss_ambig, steps_ambig = data_ambig["train_loss"], data_ambig["train_step"]
+    train_loss_hard, steps_hard = data_hard["train_loss"], data_hard["train_step"]
+
+    # Extract evaluation perplexity and steps from each dataset
+    #eval_ppl_easy = sample_evenly(data_easy["eval_ppl"], 152)
+    #eval_ppl_ambig = sample_evenly(data_ambig["eval_ppl"], 152)
+    #eval_ppl_hard = sample_evenly(data_hard["eval_ppl"], 152)
+    
+    eval_ppl_easy = data_easy["eval_ppl"]
+    eval_ppl_ambig = data_ambig["eval_ppl"]
+    eval_ppl_hard = data_hard["eval_ppl"]
+
+    print(len(eval_ppl_easy))
+    print(len(eval_ppl_hard))
+    print(len(eval_ppl_ambig))
+    # Create a plot for training loss
+    plt.figure(figsize=(10, 5))
+    plt.plot(steps_easy, train_loss_easy, label="Easy")
+    plt.plot(steps_ambig, train_loss_ambig, label="Ambiguous")
+    plt.plot(steps_hard, train_loss_hard, label="Hard")
+    plt.title("Training Loss Comparison")
+    plt.xlabel("Training Steps")
+    plt.ylabel("Training Loss")
+    plt.legend()
+    plt.savefig("/home/robert/Documents/ETT/data/logs/results/train_loss_third")
+
+    # Create a plot for evaluation perplexity
+    plt.figure(figsize=(10, 5))
+    plt.plot(steps_easy, np.log(eval_ppl_easy), label="Easy")
+    plt.plot(steps_ambig, np.log(eval_ppl_ambig), label="Ambiguous")
+    plt.plot(steps_hard, np.log(eval_ppl_hard), label="Hard")
+    plt.title("Evaluation Perplexity Comparison")
+    plt.xlabel("Training Steps")
+    plt.ylabel("Evaluation Perplexity")
+    plt.legend()
+    plt.savefig("/home/robert/Documents/ETT/data/logs/results/test_loss_third")
+
+    # Determine the number of steps to zoom in on
+    zoom_steps = 100  # Change this number to adjust the zoom level
+
+    # Create a plot for evaluation perplexity using a logarithmic scale, focusing on the last few steps
+    plt.figure(figsize=(10, 5))
+    plt.plot(steps_easy[-zoom_steps:], np.log(eval_ppl_easy[-zoom_steps:]), label="Easy", marker='o')
+    plt.plot(steps_ambig[-zoom_steps:], np.log(eval_ppl_ambig[-zoom_steps:]), label="Ambiguous", marker='o')
+    plt.plot(steps_hard[-zoom_steps:], np.log(eval_ppl_hard[-zoom_steps:]), label="Hard", marker='o')
+    plt.title("Zoomed Evaluation Perplexity Comparison (Log Scale)")
+    plt.xlabel("Training Steps")
+    plt.ylabel("Log of Evaluation Perplexity")
+    plt.legend()
+    plt.savefig("/home/robert/Documents/ETT/data/logs/results/test_loss_zoomed_third")  # Save the plot to a file
+
+        # Determine the number of steps to zoom in on
+    zoom_steps = 60  # Change this number to adjust the zoom level
+
+    # Create a plot for evaluation perplexity using a logarithmic scale, focusing on the last few steps
+    plt.figure(figsize=(10, 5))
+    plt.plot(steps_easy[-zoom_steps*20:-zoom_steps*19], np.log(eval_ppl_easy[-zoom_steps*20:-zoom_steps*19]), label="Easy", marker='o')
+    plt.plot(steps_ambig[-zoom_steps*20:-zoom_steps*19], np.log(eval_ppl_ambig[-zoom_steps*20:-zoom_steps*19]), label="Ambiguous", marker='o')
+    plt.plot(steps_hard[-zoom_steps*20:-zoom_steps*19], np.log(eval_ppl_hard[-zoom_steps*20:-zoom_steps*19]), label="Hard", marker='o')
+    plt.title("Zoomed Evaluation Perplexity Comparison (Log Scale)")
+    plt.xlabel("Training Steps")
+    plt.ylabel("Log of Evaluation Perplexity")
+    plt.legend()
+    plt.savefig("/home/robert/Documents/ETT/data/logs/results/test_loss_zoomed_third2")  # Save the plot to a file
+
+def check_duplicates(list):
+    int_array = np.array(list)
+    print(len(int_array))
+    unique_elements, counts = np.unique(int_array, return_counts=True)
+    print(len(unique_elements))
+    return np.any(counts > 1)
+
+def compare_partitions(partition1, partition2, partition3):
+    set1 = set(partition1)
+    set2 = set(partition2)
+    set3 = set(partition3)
+
+    # Unique elements in each partition
+    unique_to_p1 = set1 - (set2.union(set3))
+    unique_to_p2 = set2 - (set1.union(set3))
+    unique_to_p3 = set3 - (set1.union(set2))
+
+    # Common elements among any two
+    common_p1_p2 = set1.intersection(set2) - set3
+    common_p2_p3 = set2.intersection(set3) - set1
+    common_p1_p3 = set1.intersection(set3) - set2
+
+    # Common elements among all three
+    common_all = set1.intersection(set2).intersection(set3)
+
+    return {
+        "unique_to_p1": unique_to_p1,
+        "unique_to_p2": unique_to_p2,
+        "unique_to_p3": unique_to_p3,
+        "common_p1_p2": common_p1_p2,
+        "common_p2_p3": common_p2_p3,
+        "common_p1_p3": common_p1_p3,
+        "common_all": common_all
+    }
+
+
 
 def main():
     parser = process_args()
     args = parser.parse_args()
+
+    # Load data
+    amb_instances = load_train_data_from_hdf5("/home/robert/Documents/ETT/data/partitions/12L-768H-full-third/ambiguous.hdf5")['instance_order']
+    easy_instances = load_train_data_from_hdf5("/home/robert/Documents/ETT/data/partitions/12L-768H-full-third/easy.hdf5")['instance_order']
+    hard_instances = load_train_data_from_hdf5("/home/robert/Documents/ETT/data/partitions/12L-768H-full-third/hard.hdf5")['instance_order']
+
+    # Compare partitions
+    comparison_results = compare_partitions(amb_instances, easy_instances, hard_instances)
+
+    # Print results
+    for key, value in comparison_results.items():
+        print(f"{key}: {len(value)} elements")
     #data = load_train_data_from_hdf5(os.path.join(args.output_dir, "instances_masks.hdf5"))
     #data_comp = load_train_data_from_hdf5(os.path.join(args.dynamics_path, "instances_masks.hdf5"))
-
-    if args.compute_dynamics:
+    #plots(args)
+    if args.compute_dynamics:  
         compute_partitions(args)
 
 
