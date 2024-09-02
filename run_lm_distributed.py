@@ -323,6 +323,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             instance_list = list(range(0, len(train_dataset)))
         else:
             instance_list  = load_train_data_from_hdf5(os.path.join(args.partition_data_path, f"{args.data_partition}.hdf5"))['instance_order']
+            print(f"Loading instance indices from: {args.partition_data_path}/{args.data_partition}.hdf5")
 
         if args.shuffle:
             random.shuffle(instance_list)
@@ -333,7 +334,12 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         initialize_hdf5_file(os.path.join(args.output_dir, "instances_masks.hdf5"), instance_list)
 
     else:
-        instance_list = load_train_data_from_hdf5(os.path.join(args.output_dir, "instances_masks.hdf5"))['instance_order']
+        if args.data_partition in ['none', 'rand']:
+            instance_list = load_train_data_from_hdf5(os.path.join(args.output_dir, "instances_masks.hdf5"))['instance_order']
+            print(f"Loading instance indices from: {args.output_dir}/instances_masks.hdf5")
+        else:
+            instance_list  = load_train_data_from_hdf5(os.path.join(args.partition_data_path, f"{args.data_partition}.hdf5"))['instance_order']
+            print(f"Loading instance indices from: {args.partition_data_path}/{args.data_partition}.hdf5")
 
     epochs_trained = global_step // (len(instance_list) // args.train_batch_size // args.gradient_accumulation_steps)
     steps_per_epoch = len(instance_list) // (args.train_batch_size * args.gradient_accumulation_steps)
