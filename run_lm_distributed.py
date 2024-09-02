@@ -674,13 +674,15 @@ def compute_dynamics(args, train_dataset, tokenizer):
         
         if args.dynamics_path == "none":
             args.dynamics_path = args.output_dir
+            args.output_dir = os.path.join(args.output_dir, f"dynamics_eval_{args.seed}.hdf5")
+        else:
+            args.output_dir = os.path.join(args.output_dir, f"dynamics_eval_unseen_{args.seed}.hdf5")
 
         data = load_train_data_from_hdf5(os.path.join(args.dynamics_path, "instances_masks.hdf5"))
         instance_list = data['instance_order']
 
         args.max_steps = len(instance_list) // args.eval_batch_size
         args.logging_steps *= args.gradient_accumulation_steps
-        args.output_dir = os.path.join(args.output_dir, "dynamics_eval_rdm_masks.hdf5") if args.random_masks else os.path.join(args.output_dir, f"dynamics_eval_{args.seed}.hdf5") 
 
         if not os.path.isfile(args.output_dir):
             initialize_hdf5_file_eval(args.output_dir, args.max_steps * args.eval_batch_size,  len(model_names))
@@ -702,8 +704,6 @@ def compute_dynamics(args, train_dataset, tokenizer):
                     args=args
                 )
                 model.to(args.device)
-                if args.random_masks:
-                    args.seed = 42
                 
                 #eval_thread = threading.Thread(target=evaluate_train, args=(args, train_dataset, instance_list, i, model, tokenizer))
                 #eval_thread.start()
@@ -838,7 +838,7 @@ def main():
         #train_thread.start()
 
     if args.compute_dynamics:
-        args.dynamics_ckpts_list = [5, 10, 15, 19]
+        args.dynamics_ckpts_list = [5]
         compute_dynamics(args, train_dataset, tokenizer)
 
     if train_thread is not None:
