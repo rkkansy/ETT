@@ -844,7 +844,7 @@ def main():
         #train_thread.start()
 
     if args.compute_dynamics:
-        args.dynamics_ckpts_list = [5]
+        args.dynamics_ckpts_list = [5, 10]
         compute_dynamics(args, train_dataset, tokenizer)
 
     if train_thread is not None:
