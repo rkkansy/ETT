@@ -157,7 +157,7 @@ def generate_masks(args, train_dataset, tokenizer: PreTrainedTokenizer):
         return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)
 
     global_step = 0
-    instances = list(range(len(train_dataset)))[:args.max_steps * args.train_batch_size]
+    instances = list(range(len(train_dataset)))
 
     with h5py.File(args.mask_path, 'a') as f:
         f.create_dataset("masks", shape=(len(instances), 128), dtype=np.int16)
@@ -353,7 +353,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             with h5py.File(os.path.join(args.output_dir, "instance_data.hdf5"), 'a') as f:
                 f.create_dataset(f"instance_order", data=instances, dtype=np.int32)
         else:
-            instances = list(range(len(train_dataset)))[:epoch_size]
+            instances = list(range(len(train_dataset)))
             if len(instances) < epoch_size:
                 instances = instances[:epoch_size]
             random.shuffle(instances)
