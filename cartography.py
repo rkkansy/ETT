@@ -37,6 +37,8 @@ import time
 import matplotlib.pyplot as plt
 
 import numpy as np
+import h5py
+import pandas as pd
 import torch
 from torch.nn.utils.rnn import pad_sequence
 import torch.multiprocessing as mp
@@ -64,7 +66,7 @@ sys.path.append(
 )
 from data import *
 from param import process_args
-from model import SimpleBertForMaskedLM, SimpleRobertaForMaskedLM
+from model import SimpleBertForMaskedLM
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -72,354 +74,47 @@ except ImportError:
     from tensorboardX import SummaryWriter
 
 from ligo import initialize_model_with_ligo
-
-import h5py
+from run_lm_distributed import set_seed, load_and_cache_examples
 from torch.utils.data import Sampler
 
 logger = logging.getLogger(__name__)
 
-
 MODEL_CLASSES = {
-    "bert": (BertConfig, SimpleBertForMaskedLM, BertTokenizer),
-    "roberta": (RobertaConfig, SimpleRobertaForMaskedLM, RobertaTokenizer),
+    "bert": (BertConfig, SimpleBertForMaskedLM, BertTokenizer)
 }
 
-
-def load_and_cache_examples(args, tokenizer, evaluate=False):
-    file_path = args.eval_data_file if evaluate else args.train_data_file
-    return CoLDataset(file_path, args.tokenizer_name, tokenizer, args.block_size,
-                        split_sent=args.split_sent,
-                        verbose=(args.gpu == 0))
-
-def set_seed(args):
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-
-
-def decode_tokens_with_mask(tokenizer, inputs, masked_indices):
-
-    tokens = tokenizer.convert_ids_to_tokens(inputs.tolist())
-    for idx, mask in enumerate(masked_indices):
-        if mask:
-            tokens[idx] = '[MASK]'
-    return tokenizer.convert_tokens_to_string(tokens)
-
-
-def verify_labels_with_instance(dataset, instance_id, expected_labels_cpu):
-
-    retrieved_instance_tokens, _ = dataset[instance_id]
-    retrieved_tokens_list = retrieved_instance_tokens.tolist()
-
-    for idx, label in enumerate(expected_labels_cpu):
-        if label != -100:
-            if label != retrieved_tokens_list[idx]:
-                return False  # Found a mismatch
-                
-    return True  # All non -100 labels matched
-
-def load_data_in_chunks(file_path, dataset_name, chunk_size=1024):
-    chunks = []
-    
-    with h5py.File(file_path, 'r') as f:
-        dataset = f[dataset_name]
-        for start in range(0, dataset.shape[0], chunk_size):
-            end = min(start + chunk_size, dataset.shape[0])
-            chunks.append(dataset[start:end])
-    
-    return chunks
-
-def epoch_mean(instance_order, vals, selected_epochs, instance_range, step_size):
-
-    instance_indices = np.array(range(instance_range[0], instance_range[1], step_size))
-    epoch_indices = np.array(selected_epochs)
-    selected_vals = vals[instance_indices[:, None], epoch_indices]
-    means = np.mean(selected_vals, axis=1)
-
-    return means
-
-def epoch_variability(instance_order, vals, selected_epochs, instance_range, step_size):
-
-    instance_indices = np.array(range(instance_range[0], instance_range[1], step_size))
-    epoch_indices = np.array(selected_epochs)
-    selected_vals = vals[instance_indices[:, None], epoch_indices]
-    variabilities = np.var(selected_vals, axis=1)
-    
-    return variabilities
-
-def select_top_indices(data, frac=0.33):
-
-    num_to_select = int(len(data) * frac)
-    sorted_indices = np.argsort(data)[::-1]
-    top_indices = sorted_indices[:num_to_select]
-
-    return top_indices
-
-def select_bottom_indices(data, frac=0.33):
-    num_to_select = int(len(data) * frac)
-    sorted_indices = np.argsort(data)
-    bottom_indices = sorted_indices[:num_to_select]
-
-    return bottom_indices
-
-def compare_indices(indices1, indices2):
-
-    set1 = set(indices1)
-    set2 = set(indices2)
-    
-    common_indices = set1 & set2
-    unique_indices1 = set1 - set2
-    unique_indices2 = set2 - set1
-    
-    percent_common = len(common_indices) / len(set1)
-    
-    return {
-        "percent_common": percent_common,
-        "common_indices": common_indices,
-        "unique_indices1": unique_indices1,
-        "unique_indices2": unique_indices2,
-    }
-
-def make_plot_epoch(args, instance_order, correctness_means1, correctness_means2, mean_confidences, geom_mean_confidences, variabilities_mean, variabilities_geom_mean):
-    markers = []
-    for i, corr in enumerate(correctness_means1):
-        if 0 < corr <= 0.1:
-            markers.append('o')  # Circle
-        elif 0.1 < corr <= 0.2:
-            markers.append('*')  # Star
-        elif 0.2 < corr <= 0.3:
-            markers.append('+')  # Plus
-        elif 0.3 < corr <= 0.5:
-            markers.append('x')  # Cross
-        elif 0.5 < corr <= 0.7:
-            markers.append('D')  # Diamond
-        elif 0.7 < corr <= 0.8:
-            markers.append('s')  # Square
-        elif 0.8 < corr <= 1.0:
-            markers.append('^')  # Triangle
-        else:
-            markers.append('.')  # Point
-
-    markers2 = []
-    for i, corr in enumerate(correctness_means2):
-        if 0 < corr <= 0.1:
-            markers2.append('o')  # Circle
-        elif 0.1 < corr <= 0.2:
-            markers2.append('*')  # Star
-        elif 0.2 < corr <= 0.3:
-            markers2.append('+')  # Plus
-        elif 0.3 < corr <= 0.5:
-            markers2.append('x')  # Cross
-        elif 0.5 < corr <= 0.7:
-            markers2.append('D')  # Diamond
-        elif 0.7 < corr <= 0.8:
-            markers2.append('s')  # Square
-        elif 0.8 < corr <= 1.0:
-            markers2.append('^')  # Triangle
-        else:
-            markers2.append('.')  # Point
-
-    fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(8, 12))
-
-    # Plotting for Mean Confidences vs. Variabilities
-    colors1 = plt.cm.coolwarm(correctness_means1)  # Precompute all colors
-
-    colors2 = plt.cm.coolwarm(correctness_means2)  # Precompute all colors
-
-    for x, y, m, c in zip(variabilities_mean, mean_confidences, markers, colors1):
-        axes[0].scatter(x, y, marker=m, color=c, alpha=0.5)
-    axes[0].set_title('New: Mean Confidences vs. Variabilities')
-    axes[0].set_xlabel('Variability')
-    axes[0].set_ylabel('Mean Confidence')
-    axes[0].grid(True)
-
-    # Plotting for Geometric Mean Confidences vs. Variabilities
-    for x, y, m, c in zip(variabilities_geom_mean, geom_mean_confidences, markers2, colors2):
-        axes[1].scatter(x, y, marker=m, color=c, alpha=0.5)
-    axes[1].set_title('New: Geometric Mean Confidences vs. Variabilities')
-    axes[1].set_xlabel('Variability')
-    axes[1].set_ylabel('Geometric Mean Confidence')
-    axes[1].grid(True)
-
-    # Colorbars for the scatter plots
-    cbar1 = plt.colorbar(plt.cm.ScalarMappable(cmap='coolwarm'), ax=axes[0])
-    cbar1.set_label('Correctness')
-    cbar2 = plt.colorbar(plt.cm.ScalarMappable(cmap='coolwarm'), ax=axes[1])
-    cbar2.set_label('Correctness')
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(args.output_dir, "epoch_plot.png"))
-            
-def make_plot_epoch2(args, instance_order, correctness_means, mean_confidences, geom_mean_confidences, variabilities_mean, variabilities_geom_mean):
-    # Create marker array based on correctness levels
-    markers = ['o' if 0 < x <= 0.1 else '*' if 0.1 < x <= 0.2 else '+' if 0.2 < x <= 0.3 else 'x' if 0.3 < x <= 0.5 else 
-               'D' if 0.5 < x <= 0.7 else 's' if 0.7 < x <= 0.8 else '^' if 0.8 < x <= 1.0 else '.' for x in correctness_means]
-
-    fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(8, 12))
-
-    # Filter data where mean_confidences < 0.2
-    filter_indices = np.where(mean_confidences < 0.8 and variabilities_mean < 0.25)
-    filtered_mean_confidences = mean_confidences[filter_indices]
-    filtered_variabilities_mean = variabilities_mean[filter_indices]
-    filtered_colors = plt.cm.coolwarm(correctness_means[filter_indices])
-    filtered_markers = [markers[i] for i in filter_indices[0]]
-
-    # Plotting for Mean Confidences vs. Variabilities with filtered data
-    for x, y, m, c in zip(filtered_variabilities_mean, filtered_mean_confidences, filtered_markers, filtered_colors):
-        axes[0].scatter(x, y, marker=m, color=c, alpha=0.5)
-    axes[0].set_title('Filtered: Mean Confidences vs. Variabilities (<0.2)')
-    axes[0].set_xlabel('Variability')
-    axes[0].set_ylabel('Mean Confidence')
-    axes[0].grid(True)
-
-    # Apply similar filtering for geometric mean confidences if needed
-    filter_indices_geom = np.where(geom_mean_confidences < 0.8 and variabilities_geom_mean < 0.04)
-    filtered_geom_mean_confidences = geom_mean_confidences[filter_indices_geom]
-    filtered_variabilities_geom_mean = variabilities_geom_mean[filter_indices_geom]
-    filtered_colors_geom = plt.cm.coolwarm(correctness_means[filter_indices_geom])
-    filtered_markers_geom = [markers[i] for i in filter_indices_geom[0]]
-
-    # Plotting for Geometric Mean Confidences vs. Variabilities with filtered data
-    for x, y, m, c in zip(filtered_variabilities_geom_mean, filtered_geom_mean_confidences, filtered_markers_geom, filtered_colors_geom):
-        axes[1].scatter(x, y, marker=m, color=c, alpha=0.5)
-    axes[1].set_title('Filtered: Geometric Mean Confidences vs. Variabilities (<0.2)')
-    axes[1].set_xlabel('Variability')
-    axes[1].set_ylabel('Geometric Mean Confidence')
-    axes[1].grid(True)
-
-    # Add colorbars and legends as needed
-    plt.colorbar(plt.cm.ScalarMappable(cmap='coolwarm'), ax=axes[0]).set_label('Correctness')
-    plt.colorbar(plt.cm.ScalarMappable(cmap='coolwarm'), ax=axes[1]).set_label('Correctness')
-    plt.tight_layout()
-    plt.savefig(os.path.join(args.output_dir, "filtered_epoch_plot_2.png"))
-
-
-def process_dataset(data, instance_order, selected_instances, epochs, step_size):
-    
-    mean_confidences = np.array([])
-    variabilities_mean = np.array([])
-    mean_confidence = data['mean_confidence']
-    print("Calculating mean confidence.")
-
-    half = selected_instances[1] // 2
-    mean_confidences = np.concatenate((mean_confidences, epoch_mean(instance_order, mean_confidence, epochs, [0, half], step_size)), axis=0)
-    mean_confidences = np.concatenate((mean_confidences, epoch_mean(instance_order, mean_confidence, epochs, [half, selected_instances[1]], step_size)), axis=0)
-    
-    variabilities_mean = np.concatenate((variabilities_mean, epoch_variability(instance_order, mean_confidence, epochs, [0, half], step_size)), axis=0)
-    variabilities_mean = np.concatenate((variabilities_mean, epoch_variability(instance_order, mean_confidence, epochs, [half, selected_instances[1]], step_size)), axis=0)
-
-    del data['mean_confidence']
-    del mean_confidence
-    gc.collect()
-
-    geom_mean_confidences = np.array([])
-    variabilities_geom_mean = np.array([])
-
-    geom_mean_confidence = data['geom_mean_confidence']
-    print("Calculating geometric mean confidence.")
-    geom_mean_confidences = np.concatenate((geom_mean_confidences, epoch_mean(instance_order, geom_mean_confidence, epochs, [0, half], step_size)), axis=0)
-    variabilities_geom_mean = np.concatenate((variabilities_geom_mean, epoch_variability(instance_order, geom_mean_confidence, epochs, [0, half], step_size)), axis=0)
-
-    geom_mean_confidences = np.concatenate((geom_mean_confidences, epoch_mean(instance_order, geom_mean_confidence, epochs, [half, selected_instances[1]], step_size)), axis=0)
-    variabilities_geom_mean = np.concatenate((variabilities_geom_mean, epoch_variability(instance_order, geom_mean_confidence, epochs, [half, selected_instances[1]], step_size)), axis=0)
-
-    del data['geom_mean_confidence']
-    del geom_mean_confidence
-    gc.collect()
-
-    correctness = data['correctness']
-    print("Calculating correctness.")
-    correctness_means = epoch_mean(instance_order, correctness, epochs, selected_instances, step_size)
-
-    print(np.mean(correctness_means))
-    print(np.mean(mean_confidences))
-    print(np.mean(geom_mean_confidences))
-    print(np.mean(variabilities_mean))
-    print(np.mean(variabilities_geom_mean))    
-    print()
-
-    return {
-        "mean_confidences": mean_confidences,
-        "geom_mean_confidences": geom_mean_confidences,
-        "variabilities_mean": variabilities_mean,
-        "variabilities_geom_mean": variabilities_geom_mean,
-        "correctness_means": correctness_means
-    }
-
-def compute_partitions(args):
-
-    data_train = load_train_data_from_hdf5(os.path.join(args.output_dir, "instances_masks.hdf5"))
-    data_eval = load_eval_data_from_hdf5(os.path.join(args.output_dir, "dynamics_eval.hdf5"))
-
-    instance_order = data_train['instance_order']
-    print(len(instance_order))
-
-    print(len(data_eval['mean_confidence']))
-    epochs = []
-    for i in range(len(data_eval['mean_confidence'][0])):
-        if data_eval['mean_confidence'][len(data_eval['mean_confidence']) - 1][i] != 0:
-            epochs.append(i)
-            print(i)
-
-    selected_instances = [0, len(data_eval['mean_confidence'])]
-
-    results_eval = process_dataset(data_eval, instance_order, selected_instances, epochs, 1)
-
-    mean_confidences_top_indices = select_top_indices(results_eval['mean_confidences'])
-
-    variabilities_mean_top_indices = select_top_indices(results_eval['variabilities_mean'])
-
-    mean_confidences_bottom_indices = select_bottom_indices(results_eval['mean_confidences'])
-
-    mean_easy_instances = instance_order[mean_confidences_top_indices]
-    mean_hard_instances = instance_order[mean_confidences_bottom_indices]
-    mean_ambiguous_instances = instance_order[variabilities_mean_top_indices]
-
-    os.makedirs(args.partition_data_path, exist_ok=False)
-
-    initialize_hdf5_file(os.path.join(args.partition_data_path, "easy.hdf5"), mean_easy_instances)
-    initialize_hdf5_file(os.path.join(args.partition_data_path, "hard.hdf5"), mean_hard_instances)
-    initialize_hdf5_file(os.path.join(args.partition_data_path, "ambiguous.hdf5"), mean_ambiguous_instances)
-
-def get_percent_indices(confidences, percent):
-    num_elements = int(len(confidences) * (percent / 100))
-    sorted_indices = np.argsort(confidences)
-    return sorted_indices[:num_elements], sorted_indices[-num_elements:]
-
 def compare_dynamics(args):
-    model_path_first = "/project/data/models/BERT-6L-512H-10k"
-    model_path_second = "/project/data/models/BERT-6L-512H-10k-20k"
+    model_path_first = "/home/robert/Documents/ETT/models/BERT-small-test2"
+    model_path_second = "/home/robert/Documents/ETT/models/BERT-small-test2"
 
-    data_train_first = load_train_data_from_hdf5(os.path.join(model_path_first, "instances_masks.hdf5"))
-    data_train_second = load_train_data_from_hdf5(os.path.join(model_path_second, "instances_masks.hdf5"))
+    data_train_first = os.path.join(model_path_first, "instances_data.hdf5")
+    data_train_second = os.path.join(model_path_second, "instances_data.hdf5")
 
-    data_eval_first_seen = load_eval_data_from_hdf5(os.path.join(model_path_first, "dynamics_eval_42.hdf5"))
-    data_eval_second_seen = load_eval_data_from_hdf5(os.path.join(model_path_second, "dynamics_eval_42.hdf5"))
+    data_eval_first_seen = os.path.join(model_path_first, "dynamics_eval_42.hdf5")
     
-    data_eval_first_unseen = load_eval_data_from_hdf5(os.path.join(model_path_first, "dynamics_eval_unseen_42.hdf5"))
-    data_eval_second_unseen = load_eval_data_from_hdf5(os.path.join(model_path_second, "dynamics_eval_unseen_42.hdf5"))
+    data_eval_first_unseen = os.path.join(model_path_first, "dynamics_eval_43.hdf5")
     
     instance_order_first = data_train_first['instance_order']
     instance_order_second = data_train_second['instance_order']
 
-    mean_confidence_first_seen = data_eval_first_seen['mean_confidence'][-1]
-    mean_confidence_first_unseen = data_eval_first_unseen['mean_confidence'][-1]
- 
-    mean_confidence_second_seen = data_eval_second_seen['mean_confidence'][-1]
-    mean_confidence_second_unseen = data_eval_second_unseen['mean_confidence'][-1]
+    for i in range(1, 11):
+        mean_confidence_first_seen = data_eval_first_seen['mean_confidence'][:100*96, i]
+        mean_confidence_first_unseen = data_eval_first_seen['mean_confidence'][100*96:100*96*2, i]
 
-    # 1. Comparing instance orders
-    shared_instances = np.intersect1d(instance_order_first, instance_order_second)
-    print(f"Shared instances between Model 1 and Model 2: {len(shared_instances)}")
-
-    # 2. Confidence scores comparison
-    print("Mean confidence on seen data (Model 1):", np.mean(mean_confidence_first_seen))
-    print("Mean confidence on unseen data (Model 1):", np.mean(mean_confidence_first_unseen))
-    print("Mean confidence on seen data (Model 2):", np.mean(mean_confidence_second_seen))
-    print("Mean confidence on unseen data (Model 2):", np.mean(mean_confidence_second_unseen))
-
+        mean_confidence_first_seen2 = data_eval_first_unseen['mean_confidence'][:100*96, i]
+        mean_confidence_first_unseen2 = data_eval_first_unseen['mean_confidence'][100*96:100*96*2, i]
+    
+        # 2. Confidence scores comparison
+        print(i, "Mean confidence of first 100 batches:", np.mean(mean_confidence_first_seen))
+        print(i, "Mean confidence of last 100 batches:", np.mean(mean_confidence_first_unseen))
+        print()
+                # 2. Confidence scores comparison
+        print(i, "Mean confidence of first 100 batches rdm seed:", np.mean(mean_confidence_first_seen2))
+        print(i, "Mean confidence of last 100 batches rdm seed:", np.mean(mean_confidence_first_unseen2))
+        print()
+"""
     # Analyze top and bottom 10, 20, 30 percent
-    for frac in [10, 20, 30, 40, 50]:
+    for frac in [1, 5, 10, 20, 50]:
 
         print(f"\n--- Comparing top and bottom {frac}% instances ---")
 
@@ -444,12 +139,103 @@ def compare_dynamics(args):
         bottom_instances_second_unseen = set(instance_order_first[bottom_indices])
 
         # Calculate and print intersections
-        print(f"Intersection of top {frac}% between Model 1 Seen and Model 2 Seen: {len(top_instances_first_seen & top_instances_second_unseen)} / {len(top_instances_first_seen)}")
-        print(f"Intersection of bottom {frac}% between Model 1 Seen and Model 2 Seen: {len(bottom_instances_first_seen & bottom_instances_second_unseen)} / {len(top_instances_first_seen)}")
+        print(f"Intersection of top {frac}% for Model 1 training data: {len(top_instances_first_seen & top_instances_second_unseen)} / {len(top_instances_first_seen)} | {len(top_instances_first_seen & top_instances_second_unseen) / len(top_instances_first_seen)}")
+        print(f"Intersection of bottom {frac}% between Model 1 Seen and Model 2 Seen: {len(bottom_instances_first_seen & bottom_instances_second_unseen)} / {len(top_instances_first_seen)} | {len(bottom_instances_first_seen & bottom_instances_second_unseen) / len(top_instances_first_seen)}")
         
-        print(f"Intersection of top {frac}% between Model 1 Unseen and Model 2 Unseen: {len(top_instances_first_unseen & top_instances_second_seen)} / {len(top_instances_first_seen)}")
-        print(f"Intersection of bottom {frac}% between Model 1 Unseen and Model 2 Unseen: {len(bottom_instances_first_unseen & bottom_instances_second_seen)} / {len(top_instances_first_seen)}")
+        print(f"Intersection of top {frac}% between Model 1 Unseen and Model 2 Unseen: {len(top_instances_first_unseen & top_instances_second_seen)} / {len(top_instances_first_seen)} | {len(top_instances_first_unseen & top_instances_second_seen) / len(top_instances_first_seen)}")
+        print(f"Intersection of bottom {frac}% between Model 1 Unseen and Model 2 Unseen: {len(bottom_instances_first_unseen & bottom_instances_second_seen)} / {len(top_instances_first_seen)} | {len(bottom_instances_first_unseen & bottom_instances_second_seen) / len(top_instances_first_seen)}")
         print()
+"""
+
+
+def load_log_data(directory_path):
+    log_data = {}
+    for filename in os.listdir(directory_path):
+        if filename.endswith('.txt'):
+            file_path = os.path.join(directory_path, filename)
+            # Manually parsing each file
+            with open(file_path, 'r') as file:
+                lines = file.readlines()
+                headers = lines[0].strip().split(', ')
+                headers = [header.split('=')[0] for header in headers if '=' in header]  # Extract proper header names
+                
+                # Prepare a list of dictionaries for DataFrame construction
+                entries = []
+                for line in lines:
+                    values = line.strip().split(', ')
+                    # Ensure each part of the line can be split on '='
+                    if all('=' in value for value in values):
+                        entry = {}
+                        for value in values:
+                            parts = value.split('=')
+                            if len(parts) == 2 and parts[0] in headers:
+                                try:
+                                    entry[parts[0]] = float(parts[1])  # Extract and convert data
+                                except ValueError:
+                                    print(f"Skipping malformed data entry in {filename}: {value}")
+                        if entry:  # Ensure the entry is not empty
+                            entries.append(entry)
+                    else:
+                        print(f"Skipping malformed line in {filename}: {line}")
+
+                if entries:
+                    df = pd.DataFrame(entries)
+                    
+                    # Calculate the log of evaluation perplexity
+                    if 'eval_ppl' in df.columns:
+                        df['log_eval_ppl'] = np.log(df['eval_ppl'])
+                    
+                        # Smooth the log of evaluation perplexity using a moving average
+                        window_size = 10  # Define the window size for the moving average
+                        df['smoothed_log_eval_ppl'] = df['log_eval_ppl'].rolling(window=window_size).mean()
+                    
+                        # Exponential smoothing
+                        smoothing_factor = 0.2  # Alpha parameter for exponential smoothing
+                        df['exp_smoothed_log_eval_ppl'] = df['log_eval_ppl'].ewm(alpha=smoothing_factor).mean()
+                    
+                    log_data[filename] = df
+    
+    return log_data
+
+def plot_train_loss(log_data, x_limits=None, y_limits=None):
+    plt.figure(figsize=(14, 7))
+    
+    # Plot for "one" models
+    ax_one = plt.subplot(1, 2, 1)
+    for name, df in log_data.items():
+        if 'one' in name:
+            ax_one.plot(df['train_step'], df['exp_smoothed_log_eval_ppl'], label=name.split('.')[0])
+    ax_one.set_title('Training Loss for "One" Models')
+    ax_one.set_xlabel('Training Step')
+    ax_one.set_ylabel('Training Loss')
+    ax_one.legend()
+    ax_one.grid(True)
+
+    # Set x and y limits if specified
+    if x_limits:
+        ax_one.set_xlim(x_limits)
+    if y_limits:
+        ax_one.set_ylim(y_limits)
+
+    # Plot for "full" models
+    ax_full = plt.subplot(1, 2, 2)
+    for name, df in log_data.items():
+        if 'full' in name:
+            ax_full.plot(df['train_step'], df['exp_smoothed_log_eval_ppl'], label=name.split('.')[0])
+    ax_full.set_title('Training Loss for "Full" Models')
+    ax_full.set_xlabel('Training Step')
+    ax_full.set_ylabel('Training Loss')
+    ax_full.legend()
+    ax_full.grid(True)
+
+    # Set x and y limits if specified
+    if x_limits:
+        ax_full.set_xlim(x_limits)
+    if y_limits:
+        ax_full.set_ylim(y_limits)
+
+    plt.tight_layout()
+    plt.show()
 
 def eval(args):
     set_seed(args)  # Added here for reproducibility
@@ -502,6 +288,11 @@ def eval(args):
             sorted_confidence.append(sorted_confidence_batches[j][i] + j * batch_size)
             sorted_entropy.append(sorted_entropy_batches[j][i] + j * batch_size)
 
+    sorted_confidence_top_indices_10 = select_top_indices(confidence[sorted_confidence[:total_steps*10]])
+    sorted_confidence_top_indices_20 = select_top_indices(confidence[sorted_confidence[:total_steps*20]])
+    sorted_confidence_top_indices_50 = select_top_indices(confidence[sorted_confidence[:total_steps*50]])
+
+
     plot_confidence_sorted = []
     plot_confidence = []
     plot_entropy_sorted = []
@@ -539,148 +330,232 @@ def eval(args):
     plt.legend()
     plt.grid(True)
     plt.savefig("/project/data/models/BERT-6L-512H-10k-step-dyn/entropy")
+   
+def get_percent_indices(confidences, percent):
+    num_elements = int(len(confidences) * (percent / 100))
+    sorted_indices = np.argsort(confidences)
+    return sorted_indices[:num_elements], sorted_indices[-num_elements:]
 
+def plot_metrics(step_size, confidence, entropy, variability, correctness):
+    # Create a colormap and normalize based on the correctness values
+    cmap = plt.cm.viridis  # You can change this to any other colormap as needed (e.g., plt.cm.coolwarm)
+    norm = plt.Normalize(vmin=0, vmax=1)  # Assuming correctness ranges from 0 to 1
     
-def sample_evenly(data, target_length):
-    data = np.array(data)
-    indices = np.linspace(0, len(data) - 1, target_length, dtype=int)
-    return data[indices]
+    fig, axs = plt.subplots(1, 3, figsize=(18, 6))
 
-def plots(args):
-    # Load data from log files
-    data_easy = extract_data_from_log("/home/robert/Documents/ETT/data/logs/results/third_easy.txt")
-    data_ambig = extract_data_from_log("/home/robert/Documents/ETT/data/logs/results/third_amb.txt")
-    data_hard = extract_data_from_log("/home/robert/Documents/ETT/data/logs/results/third_hard.txt")
+    # Select every 1000th entry from each metric
+    indices = range(0, len(confidence), step_size)
+    selected_confidence = [confidence[i] for i in indices]
+    selected_entropy = [entropy[i] for i in indices]
+    selected_variability = [variability[i] for i in indices]
+    selected_correctness = [correctness[i] for i in indices]
 
-    # Extract training loss and steps from each dataset
-    #train_loss_easy, steps_easy = sample_evenly(data_easy["train_loss"], 152), sample_evenly(data_easy["train_step"], 152)
-    #train_loss_ambig, steps_ambig = sample_evenly(data_ambig["train_loss"], 152), sample_evenly(data_ambig["train_step"], 152)
-    #train_loss_hard, steps_hard = sample_evenly(data_hard["train_loss"], 152), sample_evenly(data_hard["train_step"], 152)
-
-    train_loss_easy, steps_easy = data_easy["train_loss"], data_easy["train_step"]
-    train_loss_ambig, steps_ambig = data_ambig["train_loss"], data_ambig["train_step"]
-    train_loss_hard, steps_hard = data_hard["train_loss"], data_hard["train_step"]
-
-    # Extract evaluation perplexity and steps from each dataset
-    #eval_ppl_easy = sample_evenly(data_easy["eval_ppl"], 152)
-    #eval_ppl_ambig = sample_evenly(data_ambig["eval_ppl"], 152)
-    #eval_ppl_hard = sample_evenly(data_hard["eval_ppl"], 152)
+    # Scatter plot for Confidence over Entropy
+    sc = axs[0].scatter(selected_entropy, selected_confidence, c=selected_correctness, cmap=cmap, norm=norm, alpha=0.7)
+    axs[0].set_xlabel('Entropy')
+    axs[0].set_ylabel('Confidence')
+    axs[0].set_title('Confidence over Entropy')
     
-    eval_ppl_easy = data_easy["eval_ppl"]
-    eval_ppl_ambig = data_ambig["eval_ppl"]
-    eval_ppl_hard = data_hard["eval_ppl"]
+    # Scatter plot for Confidence over Variability
+    axs[1].scatter(selected_variability, selected_confidence, c=selected_correctness, cmap=cmap, norm=norm, alpha=0.7)
+    axs[1].set_xlabel('Variability')
+    axs[1].set_ylabel('Confidence')
+    axs[1].set_title('Confidence over Variability')
+    
+    # Scatter plot for Entropy over Variability
+    axs[2].scatter(selected_variability, selected_entropy, c=selected_correctness, cmap=cmap, norm=norm, alpha=0.7)
+    axs[2].set_xlabel('Variability')
+    axs[2].set_ylabel('Entropy')
+    axs[2].set_title('Entropy over Variability')
+    
+    # Create a colorbar for the scatter plots
+    cbar = fig.colorbar(sc, ax=axs.ravel().tolist(), shrink=0.95)
+    cbar.set_label('Correctness')
 
-    print(len(eval_ppl_easy))
-    print(len(eval_ppl_hard))
-    print(len(eval_ppl_ambig))
-    # Create a plot for training loss
-    plt.figure(figsize=(10, 5))
-    plt.plot(steps_easy, train_loss_easy, label="Easy")
-    plt.plot(steps_ambig, train_loss_ambig, label="Ambiguous")
-    plt.plot(steps_hard, train_loss_hard, label="Hard")
-    plt.title("Training Loss Comparison")
-    plt.xlabel("Training Steps")
-    plt.ylabel("Training Loss")
-    plt.legend()
-    plt.savefig("/home/robert/Documents/ETT/data/logs/results/train_loss_third")
+    plt.tight_layout()
+    plt.show()
 
-    # Create a plot for evaluation perplexity
-    plt.figure(figsize=(10, 5))
-    plt.plot(steps_easy, np.log(eval_ppl_easy), label="Easy")
-    plt.plot(steps_ambig, np.log(eval_ppl_ambig), label="Ambiguous")
-    plt.plot(steps_hard, np.log(eval_ppl_hard), label="Hard")
-    plt.title("Evaluation Perplexity Comparison")
-    plt.xlabel("Training Steps")
-    plt.ylabel("Evaluation Perplexity")
-    plt.legend()
-    plt.savefig("/home/robert/Documents/ETT/data/logs/results/test_loss_third")
 
-    # Determine the number of steps to zoom in on
-    zoom_steps = 100  # Change this number to adjust the zoom level
+def compute_dynamics(args, ckpts, mask_set):
 
-    # Create a plot for evaluation perplexity using a logarithmic scale, focusing on the last few steps
-    plt.figure(figsize=(10, 5))
-    plt.plot(steps_easy[-zoom_steps:], np.log(eval_ppl_easy[-zoom_steps:]), label="Easy", marker='o')
-    plt.plot(steps_ambig[-zoom_steps:], np.log(eval_ppl_ambig[-zoom_steps:]), label="Ambiguous", marker='o')
-    plt.plot(steps_hard[-zoom_steps:], np.log(eval_ppl_hard[-zoom_steps:]), label="Hard", marker='o')
-    plt.title("Zoomed Evaluation Perplexity Comparison (Log Scale)")
-    plt.xlabel("Training Steps")
-    plt.ylabel("Log of Evaluation Perplexity")
-    plt.legend()
-    plt.savefig("/home/robert/Documents/ETT/data/logs/results/test_loss_zoomed_third")  # Save the plot to a file
+    confidence_list = []
+    entropy_list = []
+    correctness_list = []
+    for i in ckpts:
+        with h5py.File(os.path.join(args.output_dir, f"dynamics_data_{mask_set}.hdf5"), 'r') as f:
+            confidence_list.append(f[f'confidence_ckpt_{i}'][:])
+            entropy_list.append(f[f'entropy_ckpt_{i}'][:])
+            correctness_list.append(f[f'correctness_ckpt_{i}'][:])
+            if args.verbose:
+                print()
+                print(f"correctness at checkpoint {i}: ", f[f'correctness_ckpt_{i}'][:])
+                print(f"Entropy at checkpoint {i}: ", f[f'entropy_ckpt_{i}'][:])
+                print(f"Confidence at checkpoint {i}: ", f[f'confidence_ckpt_{i}'][:])
 
-        # Determine the number of steps to zoom in on
-    zoom_steps = 60  # Change this number to adjust the zoom level
 
-    # Create a plot for evaluation perplexity using a logarithmic scale, focusing on the last few steps
-    plt.figure(figsize=(10, 5))
-    plt.plot(steps_easy[-zoom_steps*20:-zoom_steps*19], np.log(eval_ppl_easy[-zoom_steps*20:-zoom_steps*19]), label="Easy", marker='o')
-    plt.plot(steps_ambig[-zoom_steps*20:-zoom_steps*19], np.log(eval_ppl_ambig[-zoom_steps*20:-zoom_steps*19]), label="Ambiguous", marker='o')
-    plt.plot(steps_hard[-zoom_steps*20:-zoom_steps*19], np.log(eval_ppl_hard[-zoom_steps*20:-zoom_steps*19]), label="Hard", marker='o')
-    plt.title("Zoomed Evaluation Perplexity Comparison (Log Scale)")
-    plt.xlabel("Training Steps")
-    plt.ylabel("Log of Evaluation Perplexity")
-    plt.legend()
-    plt.savefig("/home/robert/Documents/ETT/data/logs/results/test_loss_zoomed_third2")  # Save the plot to a file
+    confidence = np.mean(confidence_list, axis=0)
+    entropy = np.mean(entropy_list, axis=0)
+    correctness = np.mean(correctness_list, axis=0)
+    variability = np.std(confidence_list, axis=0)
 
-def check_duplicates(list):
-    int_array = np.array(list)
-    print(len(int_array))
-    unique_elements, counts = np.unique(int_array, return_counts=True)
-    print(len(unique_elements))
-    return np.any(counts > 1)
-
-def compare_partitions(partition1, partition2, partition3):
-    set1 = set(partition1)
-    set2 = set(partition2)
-    set3 = set(partition3)
-
-    # Unique elements in each partition
-    unique_to_p1 = set1 - (set2.union(set3))
-    unique_to_p2 = set2 - (set1.union(set3))
-    unique_to_p3 = set3 - (set1.union(set2))
-
-    # Common elements among any two
-    common_p1_p2 = set1.intersection(set2) - set3
-    common_p2_p3 = set2.intersection(set3) - set1
-    common_p1_p3 = set1.intersection(set3) - set2
-
-    # Common elements among all three
-    common_all = set1.intersection(set2).intersection(set3)
-
-    return {
-        "unique_to_p1": unique_to_p1,
-        "unique_to_p2": unique_to_p2,
-        "unique_to_p3": unique_to_p3,
-        "common_p1_p2": common_p1_p2,
-        "common_p2_p3": common_p2_p3,
-        "common_p1_p3": common_p1_p3,
-        "common_all": common_all
+    results = {
+        "confidence": confidence,
+        "entropy": entropy,
+        "correctness": correctness,
+        "variability": variability,
     }
+    return results
+
+def compute_partitions(args, ckpts, dynamics, mask_set, frac=0.33):
+
+    with h5py.File(os.path.join(args.output_dir, "instance_data.hdf5"), 'r') as f:
+        instance_order = f['instance_order'][:]
+    
+    partition_size = int(len(instance_order) * frac)
+    compute_dynamics(args, ckpts, mask_set)
+
+    sorted_ids_confidence = np.argsort(dynamics["confidence"])
+    sorted_ids_variability = np.argsort(dynamics["variability"])
+    sorted_ids_entropy = np.argsort(dynamics["entropy"])
+
+    easy_instances = instance_order[sorted_ids_confidence[partition_size:]]
+    hard_instances = instance_order[sorted_ids_confidence[:partition_size]]
+    ambiguous_instances = instance_order[sorted_ids_variability[partition_size:]]
+
+    high_entropy_instances = instance_order[sorted_ids_entropy[partition_size:]]
+    low_entropy_instances = instance_order[sorted_ids_entropy[:partition_size]]
+
+    partition_folder_path = os.path.join(args.output_dir, f"partitions_{mask_set}")
+
+    os.makedirs(partition_folder_path, exist_ok=True)
+
+    with h5py.File(os.path.join(partition_folder_path, "easy.hdf5"), 'a') as f:
+        f.create_dataset(f"instance_order", data=easy_instances, dtype=np.int32)
+    with h5py.File(os.path.join(partition_folder_path, "hard.hdf5"), 'a') as f:
+        f.create_dataset(f"instance_order", data=hard_instances, dtype=np.int32)
+    with h5py.File(os.path.join(partition_folder_path, "ambiguous.hdf5"), 'a') as f:
+        f.create_dataset(f"instance_order", data=ambiguous_instances, dtype=np.int32)
+    with h5py.File(os.path.join(partition_folder_path, "high_entropy.hdf5"), 'a') as f:
+        f.create_dataset(f"instance_order", data=high_entropy_instances, dtype=np.int32)
+    with h5py.File(os.path.join(partition_folder_path, "low_entropy.hdf5"), 'a') as f:
+        f.create_dataset(f"instance_order", data=low_entropy_instances, dtype=np.int32)
+    
+    results = {
+        "easy_instances": easy_instances,
+        "hard_instances": hard_instances,
+        "ambiguous_instances": ambiguous_instances,
+        "high_entropy_instances": high_entropy_instances,
+        "low_entropy_instances": low_entropy_instances
+    }
+    return results
 
 
+def evaluate_partitions(partition_data):
+    # Extract the partition sets from the results dictionary
+    easy_instances = set(partition_data['easy_instances'])
+    hard_instances = set(partition_data['hard_instances'])
+    ambiguous_instances = set(partition_data['ambiguous_instances'])
+    high_entropy_instances = set(partition_data['high_entropy_instances'])
+    low_entropy_instances = set(partition_data['low_entropy_instances'])
+    
+    # Calculate the intersections
+    intersections = {
+        'easy_hard': len(easy_instances & hard_instances),
+        'easy_ambiguous': len(easy_instances & ambiguous_instances),
+        'hard_ambiguous': len(hard_instances & ambiguous_instances),
+        'high_entropy_low_entropy': len(high_entropy_instances & low_entropy_instances),
+        'easy_high_entropy': len(easy_instances & high_entropy_instances),
+        'hard_high_entropy': len(hard_instances & high_entropy_instances),
+        'ambiguous_high_entropy': len(ambiguous_instances & high_entropy_instances)
+    }
+    
+    print(intersections)
+
+def compare_masks(args):
+    # Constructing file paths
+    mask_path5 = os.path.join(args.mask_path, "mask-set-1.hdf5")
+    mask_path6 = os.path.join(args.mask_path, "mask-set-2.hdf5")
+
+    # Loading the masks
+    masks5 = h5py.File(mask_path5, 'r')['masks'][:]
+    masks6 = h5py.File(mask_path6, 'r')['masks'][:]
+
+    # Comparing shapes
+    print("Shapes of mask sets:")
+    print(f"Mask Set 5: {masks5.shape}")
+    print(f"Mask Set 6: {masks6.shape}")
+
+    # Checking if the shapes are identical
+    shape_comparison = (masks5.shape == masks6.shape)
+    print(f"Are all mask shapes identical? {shape_comparison}")
+
+    # Simple content comparison example (for exact matches, which might be impractical for large data)
+    if shape_comparison:
+        same_5_6 = np.array_equal(masks5, masks6)
+        mae = np.mean(np.abs(masks5 - masks6))
+        print(f"Mean Absolute Error between Mask Set 5 and Mask Set 6: {mae}")
+
+        print("Content comparison:")
+        print(f"Masks 5 and 6 are the same: {same_5_6}")
+
+    else:
+        print("Skipping content comparison due to differing shapes.")
 
 def main():
     parser = process_args()
     args = parser.parse_args()
+    for i in range(2, 5):
+        dynamics = compute_dynamics(args, [i], 1)
+        dynamics1 = compute_dynamics(args, [i], 2)
+        train_batch_size = 64
+        checkpoint_amount = i*1000*train_batch_size
 
-    # Load data
-    amb_instances = load_train_data_from_hdf5("/home/robert/Documents/ETT/data/partitions/12L-768H-full-third/ambiguous.hdf5")['instance_order']
-    easy_instances = load_train_data_from_hdf5("/home/robert/Documents/ETT/data/partitions/12L-768H-full-third/easy.hdf5")['instance_order']
-    hard_instances = load_train_data_from_hdf5("/home/robert/Documents/ETT/data/partitions/12L-768H-full-third/hard.hdf5")['instance_order']
+        print(len(dynamics["confidence"]))
+        print(len(dynamics1["confidence"]))
 
-    # Compare partitions
-    comparison_results = compare_partitions(amb_instances, easy_instances, hard_instances)
+        print(np.mean(dynamics["confidence"][:checkpoint_amount]), np.mean(dynamics1["confidence"][:checkpoint_amount]))
+        print(np.mean(dynamics["entropy"][:checkpoint_amount]), np.mean(dynamics1["entropy"][:checkpoint_amount]))
+        print(np.mean(dynamics["correctness"][:checkpoint_amount]), np.mean(dynamics1["correctness"][:checkpoint_amount]))
+        print(np.mean(dynamics["variability"][:checkpoint_amount]), np.mean(dynamics1["variability"][:checkpoint_amount]))
 
-    # Print results
-    for key, value in comparison_results.items():
-        print(f"{key}: {len(value)} elements")
-    #data = load_train_data_from_hdf5(os.path.join(args.output_dir, "instances_masks.hdf5"))
-    #data_comp = load_train_data_from_hdf5(os.path.join(args.dynamics_path, "instances_masks.hdf5"))
-    #plots(args)
-    if args.compute_dynamics:  
-        compute_partitions(args)
+        print(np.mean(dynamics["confidence"][checkpoint_amount:]), np.mean(dynamics1["confidence"][checkpoint_amount:]))
+        print(np.mean(dynamics["entropy"][checkpoint_amount:]), np.mean(dynamics1["entropy"][checkpoint_amount:]))
+        print(np.mean(dynamics["correctness"][checkpoint_amount:]), np.mean(dynamics1["correctness"][checkpoint_amount:]))
+        print(np.mean(dynamics["variability"][checkpoint_amount:]), np.mean(dynamics1["variability"][checkpoint_amount:]))
+    compare_masks(args)
+    #print(confidence_list)
+    #print(entropy_list)
+    #print(correctness_list)
 
+    #plot_metrics(confidence, entropy, variability, correctness)
+
+
+# Usage
+    #directory_path = '/home/robert/Documents/ETT/logs'  # Change this to the path of your log files
+    #log_files_data = load_log_data(directory_path)
+    #plot_train_loss(log_files_data, y_limits=(1.5, 4))
+    #compare_dynamics(args)
 
 if __name__ == "__main__":
     main()
+
+"""
+    for i in range(2, 5):
+        dynamics = compute_dynamics(args, [i], 1)
+        dynamics1 = compute_dynamics(args, [i], 2)
+        train_batch_size = 64
+        checkpoint_amount = i*1000*train_batch_size
+
+        print(len(dynamics["confidence"]))
+        print(len(dynamics1["confidence"]))
+
+        print(np.mean(dynamics["confidence"][:checkpoint_amount]), np.mean(dynamics1["confidence"][:checkpoint_amount]))
+        print(np.mean(dynamics["entropy"][:checkpoint_amount]), np.mean(dynamics1["entropy"][:checkpoint_amount]))
+        print(np.mean(dynamics["correctness"][:checkpoint_amount]), np.mean(dynamics1["correctness"][:checkpoint_amount]))
+        print(np.mean(dynamics["variability"][:checkpoint_amount]), np.mean(dynamics1["variability"][:checkpoint_amount]))
+
+        print(np.mean(dynamics["confidence"][checkpoint_amount:]), np.mean(dynamics1["confidence"][checkpoint_amount:]))
+        print(np.mean(dynamics["entropy"][checkpoint_amount:]), np.mean(dynamics1["entropy"][checkpoint_amount:]))
+        print(np.mean(dynamics["correctness"][checkpoint_amount:]), np.mean(dynamics1["correctness"][checkpoint_amount:]))
+        print(np.mean(dynamics["variability"][checkpoint_amount:]), np.mean(dynamics1["variability"][checkpoint_amount:]))
+"""

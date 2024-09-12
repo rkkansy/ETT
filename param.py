@@ -7,7 +7,7 @@ def process_args():
     parser = configargparse.ArgumentParser()
 
     # Path to load default configs
-    parser.add_argument('--config', is_config_file=True, help='Config file path')
+    parser.add_argument('--config', default="configs/bert_wiki.txt" , is_config_file=True, help='Config file path')
 
     # Datasets
     parser.add_argument(
@@ -21,6 +21,8 @@ def process_args():
         help="An optional input evaluation data file to evaluate the perplexity on (a text file).")
     parser.add_argument("--do_train", action="store_true", help="Whether to run training.")
     parser.add_argument("--do_eval", action="store_true", help="Whether to run eval on the dev set.")
+    parser.add_argument("--verbose", action="store_true", help="Get additional information")
+
 
     # Data loader
     parser.add_argument("--add_bc", action="store_true", help="Using the specific dataset object in data.py")
@@ -53,7 +55,7 @@ def process_args():
         "--model_name_or_path", default=None, type=str,
         help="The model checkpoint for weights initialization. Leave None if you want to train a model from scratch.",)
     parser.add_argument(
-        "--config_name", default=None, type=str, required=True,
+        "--config_name", default="configs/bert-6L-768H.json", type=str, required=True,
         help="Optional pretrained config name or path if not the same as model_name_or_path. If both are None, initialize a new config.",)
     parser.add_argument(
         "--tokenizer_name", default=None, type=str,
@@ -147,21 +149,25 @@ def process_args():
     # Distributed Training
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     parser.add_argument("--nodes", type=int, default=1)
-    parser.add_argument("--nr", type=int, default=0)
+    parser.add_argument("--mask_set", type=int, default=0)
 
     # Training Dynamics
     parser.add_argument("--random_masks", action="store_true", help="Randomizes the masks used for generating data maps instead of using the same masks used for training.")
     parser.add_argument("--compute_dynamics", action="store_true", help="Compute dynamics from model checkpoint.")
+    parser.add_argument("--generate_masks", action="store_true", help="Generate a set of masks.")
     parser.add_argument("--get_dynamics", action="store_true", help="Compute dynamics from model checkpoint.")
+    parser.add_argument("--mask_path", default="none", type=str, help="Path to instance data")
 
-    parser.add_argument("--dynamics_path", default="none", type=str, help="Path to save the dynamics data.")
+    parser.add_argument("--instance_data_path", default=None, type=str, help="Path to instance data")
+    parser.add_argument("--dynamics_path", default=None, type=str, help="Path to dynamics data")
+
     parser.add_argument("--dynamics_ckpts_list", nargs='+', type=int, help="List containing the indices of the checkpoints that should be computed for the training dynamics.")
 
     parser.add_argument("--data_partition", default='none', type=str,
-                        choices=['easy', 'ambiguous', 'hard', 'rand', 'none', 'entropy', 'confidence', 'entropy_rev', 'confidence_rev', 'instances_masks'],
+                        choices=['easy', 'ambiguous', 'hard', 'rand', 'none', 'high_entropy', 'low_entropy', 'instance_data'],
                         help="Which part of the data should be used for training. Requires training dynamics to be computed."
     )
-    parser.add_argument("--partition_data_path", default="", type=str,
+    parser.add_argument("--data_partition_path", default="", type=str,
                         help="Path to computed dynamics."
     )
     # Half Precision

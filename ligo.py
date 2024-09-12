@@ -627,6 +627,7 @@ def initialize_model_with_ligo(model_large, args):
             if hasattr(module, 'bias'):
                 module.bias.copy_(modules_coeff[name].get_params()[1])
         elif isinstance(module, nn.Embedding):
+            print(name, module)
             module.weight.copy_(modules_coeff[name].get_params())
 
     return model_large

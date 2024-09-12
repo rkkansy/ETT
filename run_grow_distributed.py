@@ -34,7 +34,7 @@ from typing import Dict, List, Tuple
 from datetime import datetime
 import time
 from torch.cuda.amp import autocast, GradScaler
-from data import CustomSampler, load_train_data_from_hdf5
+from data import CustomSampler
 import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -42,6 +42,8 @@ import torch.multiprocessing as mp
 from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm, trange
+import h5py
+
 from transformers import (
     WEIGHTS_NAME,
     AdamW,
@@ -69,15 +71,13 @@ except ImportError:
 
 from ligo import create_ligo_from_model
 
-from run_lm_distributed import TextDataset, LineByLineTextDataset, load_and_cache_examples, \
-    set_seed, mask_tokens
+from run_lm_distributed import load_and_cache_examples, set_seed, mask_tokens, mask_inputs
 
 logger = logging.getLogger(__name__)
 
 
 MODEL_CLASSES = {
     "bert": (BertConfig, SimpleBertForMaskedLM, BertTokenizer),
-    "roberta": (RobertaConfig, SimpleRobertaForMaskedLM, RobertaTokenizer)
 }
 
 def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> Tuple[int, float]:
@@ -90,23 +90,31 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
     args.train_batch_size = args.train_batch_size
 
-    def collate(examples: List[torch.Tensor]):
+    def collate(examples: List[Tuple[torch.Tensor, torch.Tensor]]):
+        tokens, masks = zip(*examples)  
+        
         if tokenizer._pad_token is None:
-            return pad_sequence(examples, batch_first=True)
-        return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)
-
+            padded_tokens = pad_sequence(tokens, batch_first=True)
+        else:
+            padded_tokens = pad_sequence(tokens, batch_first=True, padding_value=tokenizer.pad_token_id)
+        
+        padded_masks = pad_sequence(masks, batch_first=True, padding_value=0)
+        return padded_tokens, padded_masks
 
     epoch_size = args.train_batch_size * args.max_steps * args.gradient_accumulation_steps
 
-    if args.data_partition in ['none', 'rand']:
-        instance_list = list(range(0, len(train_dataset)))
-        random.shuffle(instance_list)
+    if args.instance_data_path:
+        load_path = os.path.join(args.instance_data_path, f"{args.data_partition}.hdf5")
+        with h5py.File(load_path, 'r') as f:
+            instances = f['instance_order'][:]
+        logger.info(f"Loading instance indices from: {load_path}")
     else:
-        instance_list  = load_train_data_from_hdf5(os.path.join(args.partition_data_path, f"{args.data_partition}.hdf5"))['instance_order']
-        
-    instance_list = instance_list[:epoch_size]
+        instances = list(range(0, len(train_dataset)))
+        random.shuffle(instances)
 
-    train_sampler = CustomSampler(instance_list)
+    instances = instances[:epoch_size]
+
+    train_sampler = CustomSampler(instances)
     train_dataloader = DataLoader(
         train_dataset, sampler=train_sampler, shuffle=False, num_workers=0,
         batch_size=args.train_batch_size, collate_fn=collate, pin_memory=True
@@ -200,7 +208,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         t_start = time.time()
         model.zero_grad()       # Support of accumulating gradients
         for step, batch in enumerate(epoch_iterator):
-            inputs, labels, _ = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
+            inputs, labels = mask_inputs(batch[0], batch[1], tokenizer)
             inputs = inputs.to(args.device)
             labels = labels.to(args.device)
             # If some of the input is padded, then the attention mask is needed
@@ -306,7 +314,7 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
     model.eval()
 
     for batch in tqdm(eval_dataloader, desc="Evaluating"):
-        inputs, labels, _ = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
+        inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
         inputs = inputs.to(args.device)
         labels = labels.to(args.device)
         # If some of the input is padded, then the attention mask is needed
@@ -418,6 +426,8 @@ def main():
     logger.info("Training/evaluation parameters %s", args)
 
     # Training
+    args.mask_path = os.path.join(args.mask_path, f"mask-set-{args.mask_set}.hdf5")
+
     if args.do_train:
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
         train(args, train_dataset, model, tokenizer)

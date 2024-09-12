@@ -67,7 +67,7 @@ sys.path.append(
 )
 from data import *
 from param import process_args
-from model import SimpleBertForMaskedLM, SimpleRobertaForMaskedLM
+from model import SimpleBertForMaskedLM
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -80,99 +80,36 @@ logger = logging.getLogger(__name__)
 
 MODEL_CLASSES = {
     "bert": (BertConfig, SimpleBertForMaskedLM, BertTokenizer),
-    "roberta": (RobertaConfig, SimpleRobertaForMaskedLM, RobertaTokenizer),
 }
 
-
-class TextDataset(Dataset):
-    def __init__(self, tokenizer: PreTrainedTokenizer, args, file_path: str, block_size=512):
-        assert os.path.isfile(file_path)
-
-        block_size = block_size - (tokenizer.max_len - tokenizer.max_len_single_sentence)
-
-        directory, filename = os.path.split(file_path)
-        cached_features_file = os.path.join(
-            directory, args.model_type + "_cached_lm_" + str(block_size) + "_" + filename
-        )
-
-        if os.path.exists(cached_features_file) and not args.overwrite_cache:
-            logger.info("Loading features from cached file %s", cached_features_file)
-            with open(cached_features_file, "rb") as handle:
-                self.examples = pickle.load(handle)
-        else:
-            logger.info("Creating features from dataset file at %s", directory)
-
-            self.examples = []
-            with open(file_path, encoding="utf-8") as f:
-                text = f.read()
-
-            tokenized_text = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(text))
-
-            for i in range(0, len(tokenized_text) - block_size + 1, block_size):  # Truncate in block of block_size
-                self.examples.append(tokenizer.build_inputs_with_special_tokens(tokenized_text[i : i + block_size]))
-            # Note that we are loosing the last truncated example here for the sake of simplicity (no padding)
-            # If your dataset is small, first you should loook for a bigger one :-) and second you
-            # can change this behavior by adding (model specific) padding.
-
-            logger.info("Saving features into cached file %s", cached_features_file)
-            with open(cached_features_file, "wb") as handle:
-                pickle.dump(self.examples, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-    def __len__(self):
-        return len(self.examples)
-
-    def __getitem__(self, item):
-        return torch.tensor(self.examples[item], dtype=torch.long)
-
-
-class LineByLineTextDataset(Dataset):
-    def __init__(self, tokenizer: PreTrainedTokenizer, args, file_path: str, block_size=512):
-        assert os.path.isfile(file_path)
-        # Here, we do not cache the features, operating under the assumption
-        # that we will soon use fast multithreaded tokenizers from the
-        # `tokenizers` repo everywhere =)
-        logger.info("Creating features from dataset file at %s", file_path)
-
-        with open(file_path, encoding="utf-8") as f:
-            lines = [line for line in f.read().splitlines() if (len(line) > 0 and not line.isspace())]
-
-        self.examples = tokenizer.batch_encode_plus(lines, add_special_tokens=True, max_length=block_size)["input_ids"]
-
-    def __len__(self):
-        return len(self.examples)
-
-    def __getitem__(self, i):
-        return torch.tensor(self.examples[i], dtype=torch.long)
-
-
 def load_and_cache_examples(args, tokenizer, evaluate=False):
-    file_path = args.eval_data_file if evaluate else args.train_data_file_bc if args.add_bc else args.train_data_file
-    if args.col_data:
-        return CoLDataset(file_path, args.tokenizer_name, tokenizer, args.block_size,
-                          split_sent=args.split_sent,
-                          verbose=True)
-    elif args.line_by_line:
-        return LineByLineTextDataset(tokenizer, args, file_path=file_path, block_size=args.block_size)
-    else:
-        return TextDataset(tokenizer, args, file_path=file_path, block_size=args.block_size)
+    if evaluate:
+        file_path = args.eval_data_file
+        mask_path = None
+    else: 
+        file_path = args.train_data_file_bc if args.add_bc else args.train_data_file
+        mask_path=None if args.generate_masks else args.mask_path
 
+    return CoLDataset(file_path, 
+                        args.tokenizer_name, 
+                        tokenizer, 
+                        mask_path=mask_path,
+                        block_size=args.block_size,
+                        split_sent=args.split_sent,
+                        verbose=True)
 
-def set_seed(args):
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
-
-def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args, get_mask=False):
+def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args):
     """ Prepare masked tokens inputs/labels for masked language modeling: 80% MASK, 10% random, 10% original. """
     if tokenizer.mask_token is None:
         raise ValueError(
             "This tokenizer does not have a mask token which is necessary for masked language modeling. Remove the --mlm flag if you want to use this tokenizer."
         )
-    
     labels = inputs.clone()
-    operation_mask = torch.zeros(labels.shape, dtype=torch.int8)
-
     # We sample a few tokens in each sequence for masked-LM training (with probability args.mlm_probability defaults to 0.15 in Bert/RoBERTa)
     probability_matrix = torch.full(labels.shape, args.mlm_probability)
     special_tokens_mask = [
@@ -195,33 +132,96 @@ def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args, get_
     rand_words = random_words[indices_random]
 
     inputs[indices_random] = rand_words
-    
-    if get_mask:
-        operation_mask[indices_replaced] = 1  # Masked tokens marked as 1
-        operation_mask[indices_random] = 2  # Randomized tokens marked as 2
-        indices_kept = masked_indices & ~indices_replaced & ~indices_random
-        operation_mask[indices_kept] = 3
-
     # The rest of the time (10% of the time) we keep the masked input tokens unchanged
-    return inputs, labels, operation_mask
+    return inputs, labels
 
-def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> Tuple[int, float]:
-    set_seed(args)  # Added here for reproducibility
-    info = True
+def mask_inputs(inputs: torch.Tensor, operation_mask: torch.Tensor, tokenizer: PreTrainedTokenizer):
 
-    """ Train the model """
+    # Non masked tokens should be ignored (mask=0)
+    labels = inputs.clone()
+    labels[operation_mask == 0] = -100
+    # Indices larger than one are either unchanged or randomized tokens
+    random_unchanged_indices = operation_mask > 0
+    inputs[random_unchanged_indices] = operation_mask[random_unchanged_indices]
+    # -1 indicates a mask
+    inputs[operation_mask == -1] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token) 
 
-    current_time = datetime.now().strftime('%b%d_%H-%M-%S')
-    tb_writer = SummaryWriter(args.output_dir + '/runs/' + current_time)
+    return inputs, labels
+
+def generate_masks(args, train_dataset, tokenizer: PreTrainedTokenizer):
+    set_seed(args.mask_set)  # Added here for reproducibility
 
     def collate(examples: List[torch.Tensor]):
         if tokenizer._pad_token is None:
             return pad_sequence(examples, batch_first=True)
         return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)
 
-    t_total = args.max_steps
+    global_step = 0
+    instances = list(range(len(train_dataset)))[:args.max_steps * args.train_batch_size]
 
-    # Prepare optimizer and schedule (linear warmup and decay)
+    with h5py.File(args.mask_path, 'a') as f:
+        f.create_dataset("masks", shape=(len(instances), 128), dtype=np.int16)
+
+    train_sampler = CustomSampler(instances)
+    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, shuffle=False, num_workers=0,
+                                  batch_size=args.train_batch_size, collate_fn=collate, pin_memory=True
+    )
+    masks = np.zeros((args.logging_steps * args.train_batch_size, 128), dtype=np.int16)
+
+    epoch_iterator = tqdm(train_dataloader, 
+                            desc=f"Masks generated: {global_step:06d}", 
+                            ncols=100)
+    save_thread = None
+
+    for step, batch in enumerate(epoch_iterator):
+        
+        if tokenizer.mask_token is None:
+            raise ValueError(
+                "This tokenizer does not have a mask token which is necessary for masked language modeling. Remove the --mlm flag if you want to use this tokenizer."
+            )
+        operation_mask = torch.zeros(batch.shape, dtype=torch.long)
+        probability_matrix = torch.full(batch.shape, args.mlm_probability)
+        special_tokens_mask = [
+            tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in batch.tolist()
+        ]
+        probability_matrix.masked_fill_(torch.tensor(special_tokens_mask, dtype=torch.bool), value=0.0)
+        if tokenizer._pad_token is not None:
+            padding_mask = batch.eq(tokenizer.pad_token_id)
+            probability_matrix.masked_fill_(padding_mask, value=0.0)
+        masked_indices = torch.bernoulli(probability_matrix).bool()
+        # 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
+        indices_replaced = torch.bernoulli(torch.full(batch.shape, 0.8)).bool() & masked_indices
+        # 10% of the time, we replace masked input tokens with random word
+        indices_random = torch.bernoulli(torch.full(batch.shape, 0.5)).bool() & masked_indices & ~indices_replaced
+        # 10 % of the time, we dont replace the token
+        random_words = torch.randint(len(tokenizer), batch.shape, dtype=torch.long)
+        indices_kept = masked_indices & ~indices_replaced & ~indices_random
+
+        operation_mask[indices_replaced] = -1
+        operation_mask[indices_random] = random_words[indices_random]  # Store the actual random token IDs
+        operation_mask[indices_kept] = batch[indices_kept] # Store the original token IDs
+
+        insert_idx = (step % args.logging_steps) * args.train_batch_size 
+
+        masks[insert_idx : insert_idx + args.train_batch_size] = operation_mask
+
+        if (step + 1) % args.logging_steps == 0:
+            if save_thread is not None:
+                save_thread.join()
+            offset = (step + 1 - args.logging_steps) * args.train_batch_size
+            save_thread = threading.Thread(target=async_save_masks, args=(args.mask_path, offset,  masks))
+            save_thread.start()
+
+    save_thread.join()
+
+def compare_inputs_and_labels(inputs1, labels1, inputs2, labels2):
+    # Check if both inputs sets are identical
+    assert torch.equal(inputs1, inputs2), "Inputs do not match."
+
+    # Check if both labels sets are identical
+    assert torch.equal(labels1, labels2), "Labels do not match."
+
+def get_training_components(args, model):
     no_decay = ["bias", "LayerNorm.weight"]
     optimizer_grouped_parameters = [
         {
@@ -238,33 +238,34 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                       betas=(0.9, 0.98),
                       lr=args.learning_rate,
                       eps=args.adam_epsilon)
+    
     if args.warmup_ratio > 0.:
         assert args.warmup_steps == 0
-        args.warmup_steps = int(t_total * args.warmup_ratio)
+        args.warmup_steps = int(args.max_steps * args.warmup_ratio)
 
     print("Optimized with lr %f, steps %d, warmup steps %d, and use beta, epsilon %0.8f." % (
-        args.learning_rate, t_total, args.warmup_steps, optimizer.defaults['eps']), 
+        args.learning_rate, args.max_steps, args.warmup_steps, optimizer.defaults['eps']), 
         optimizer.defaults['betas'])
     
     if args.scheduler_type == 'linear':
         scheduler = get_linear_schedule_with_warmup(
-            optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total
+            optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=args.max_steps
         )
     elif args.scheduler_type == 'cosine':
         scheduler = get_cosine_schedule_with_warmup(
-            optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total,
+            optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=args.max_steps,
             num_cycles=args.scheduler_cosine_cycles
         )
     elif args.scheduler_type == 'poly':
         scheduler = get_polynomial_decay_schedule_with_warmup(
-            optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total,
+            optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=args.max_steps,
             power=args.scheduler_poly_power
         )
     elif args.scheduler_type == 'one_cycle':
         scheduler = OneCycleLR(
             optimizer,
             max_lr=0.001,
-            total_steps=t_total,
+            total_steps=args.max_steps,
             pct_start=0.5,
             anneal_strategy='linear',
             cycle_momentum=False, 
@@ -276,7 +277,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
     scaler = GradScaler(init_scale=args.init_grad_scale)
 
-    # Check if saved optimizer or scheduler states exist
+        # Check if saved optimizer or scheduler states exist
     if (args.model_name_or_path and os.path.isfile(os.path.join(args.model_name_or_path, "optimizer.pt")) 
                                 and os.path.isfile(os.path.join(args.model_name_or_path, "scheduler.pt"))
                                 and os.path.isfile(os.path.join(args.model_name_or_path, "scaler.pt"))):
@@ -284,6 +285,29 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         optimizer.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "optimizer.pt"), map_location=torch.device('cpu')))
         scheduler.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "scheduler.pt"), map_location=torch.device('cpu')))
         scaler.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "scaler.pt"), map_location=torch.device('cpu')))
+
+    return optimizer, scheduler, scaler
+
+def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> Tuple[int, float]:
+    set_seed(args.seed)  # Added here for reproducibility
+    info = True
+
+    """ Train the model """
+    current_time = datetime.now().strftime('%b%d_%H-%M-%S')
+    tb_writer = SummaryWriter(args.output_dir + '/runs/' + current_time)
+
+    def collate(examples: List[Tuple[torch.Tensor, torch.Tensor]]):
+        tokens, masks = zip(*examples)  
+        
+        if tokenizer._pad_token is None:
+            padded_tokens = pad_sequence(tokens, batch_first=True)
+        else:
+            padded_tokens = pad_sequence(tokens, batch_first=True, padding_value=tokenizer.pad_token_id)
+        
+        padded_masks = pad_sequence(masks, batch_first=True, padding_value=0)
+        return padded_tokens, padded_masks
+
+    optimizer, scheduler, scaler = get_training_components(args, model)
     
     # Train!
     logger.info("***** Running training *****")
@@ -291,7 +315,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         logger.info("  Num examples = %d", len(train_dataset))
         logger.info("  Batch size = %d", args.train_batch_size)
         logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
-        logger.info("  Total optimization steps = %d", t_total)
+        logger.info("  Total optimization steps = %d", args.max_steps)
         
     global_step = 0
     # Check if continuing training from a checkpoint
@@ -305,56 +329,71 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         except ValueError:
             logger.info("  Do not load model from %s, restart training" % args.model_name_or_path)
 
+    if global_step >= args.max_steps:
+        logger.warning("Max steps lower than trained steps. Aborting")
+        return
+    
     model.zero_grad()
-
+    
     batch_size = args.train_batch_size * args.gradient_accumulation_steps
     epoch_size = args.max_steps * batch_size
 
-    # IMPORTANT: save the initialization
     if global_step == 0:
 
         checkpoint_name = f"checkpoint-{global_step:08d}"
         ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
         os.makedirs(ckpt_dir, exist_ok=True)
         save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler, scaler)
-        if args.get_dynamics:
-            initialize_hdf5_file_train(os.path.join(args.output_dir, "single_dynamics.hdf5"), epoch_size)
-        if args.data_partition in ['none', 'rand']:
-            instance_list = list(range(0, len(train_dataset)))
+        if args.instance_data_path:
+            load_path = os.path.join(args.instance_data_path, f"{args.data_partition}.hdf5")
+            with h5py.File(load_path, 'r') as f:
+                instances = f['instance_order'][:]
+            logger.info(f"Loading instance indices from: {load_path}")
+
+            with h5py.File(os.path.join(args.output_dir, "instance_data.hdf5"), 'a') as f:
+                f.create_dataset(f"instance_order", data=instances, dtype=np.int32)
         else:
-            instance_list  = load_train_data_from_hdf5(os.path.join(args.partition_data_path, f"{args.data_partition}.hdf5"))['instance_order']
-            print(f"Loading instance indices from: {args.partition_data_path}/{args.data_partition}.hdf5")
+            instances = list(range(len(train_dataset)))[:epoch_size]
+            if len(instances) < epoch_size:
+                instances = instances[:epoch_size]
+            random.shuffle(instances)
 
-        if args.shuffle:
-            random.shuffle(instance_list)
-            
-        if epoch_size < len(instance_list):
-            instance_list = instance_list[:epoch_size]
-    
-        initialize_hdf5_file(os.path.join(args.output_dir, "instances_masks.hdf5"), instance_list)
-
+            with h5py.File(os.path.join(args.output_dir, "instance_data.hdf5"), 'a') as f:
+                f.create_dataset(f"instance_order", data=instances, dtype=np.int32)
     else:
-        if args.data_partition in ['none', 'rand']:
-            instance_list = load_train_data_from_hdf5(os.path.join(args.output_dir, "instances_masks.hdf5"))['instance_order']
-            print(f"Loading instance indices from: {args.output_dir}/instances_masks.hdf5")
+        if args.instance_data_path:
+            load_path = os.path.join(args.instance_data_path, f"{args.data_partition}.hdf5")
         else:
-            instance_list  = load_train_data_from_hdf5(os.path.join(args.partition_data_path, f"{args.data_partition}.hdf5"))['instance_order']
-            print(f"Loading instance indices from: {args.partition_data_path}/{args.data_partition}.hdf5")
+            load_path = os.path.join(args.output_dir, "instance_data.hdf5")
 
-    epochs_trained = global_step // (len(instance_list) // args.train_batch_size // args.gradient_accumulation_steps)
-    steps_per_epoch = len(instance_list) // (args.train_batch_size * args.gradient_accumulation_steps)
+        with h5py.File(load_path, 'r') as f:
+            instances = f['instance_order'][:]
+        logger.info(f"Loading instance indices from: {load_path}")
+
+    instance_amount = len(instances) 
+
+    steps_per_epoch = instance_amount // (args.train_batch_size * args.gradient_accumulation_steps)
     start_index = (global_step % steps_per_epoch) * args.gradient_accumulation_steps
+    instances = instances[start_index * args.train_batch_size:]
 
-    if args.data_partition in ['none', 'rand']:
-        instance_list = instance_list[start_index * args.train_batch_size:]
-        start_index = 0
+    epochs_trained = global_step // (instance_amount // args.train_batch_size // args.gradient_accumulation_steps)
+    
+    if args.shuffle:
+        random.shuffle(instances)
 
-    train_sampler = CustomSampler(instance_list)
+    train_sampler = CustomSampler(instances)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, shuffle=False, num_workers=0,
                                   batch_size=args.train_batch_size, collate_fn=collate, pin_memory=True
     )
-    mean_confidence = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
-    mean_entropy = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
+    if args.get_dynamics:
+        with h5py.File(args.dynamics_path, 'a') as f:
+            f.create_dataset("confidence_ckpt_0", shape=(epoch_size), dtype=np.float32)
+            f.create_dataset("entropy_ckpt_0", shape=(epoch_size), dtype=np.float32)
+            f.create_dataset("correctness_ckpt_0", shape=(epoch_size), dtype=np.float32)
+
+        correctness = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
+        confidence = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
+        entropy = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
 
     save_thread = None
 
@@ -366,10 +405,10 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         t_start = time.time()
         model.zero_grad()       # Support of accumulating gradients
 
-        print(f"Epochs trained: {epochs_trained} | Seed: {args.seed}")
+        logger.info(f"Epochs trained: {epochs_trained} | Seed: {args.seed}")
 
         for step, batch in enumerate(epoch_iterator):
-            inputs, labels, _ = mask_tokens(batch, tokenizer, args)
+            inputs, labels = mask_inputs(batch[0], batch[1], tokenizer)
             inputs = inputs.to(args.device)
             labels = labels.to(args.device)
 
@@ -388,29 +427,41 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                 loss = outputs['loss']  # model outputs are always tuple in transformers (see doc)
 
                 if args.get_dynamics:
+                    with torch.no_grad():
+                        logits = outputs['logits']
+                        softmax_logits = torch.softmax(logits, dim=-1)  
 
-                    insert_idx = (step % args.logging_steps) * args.train_batch_size 
-                    insert_idx_batch = insert_idx + args.train_batch_size
+                        insert_idx = (step % args.logging_steps) * args.train_batch_size 
+                        insert_idx_batch = insert_idx + args.train_batch_size
 
-                    logits = outputs['logits']
-                    softmax_logits = torch.softmax(logits, dim=-1)  
+                        valid_labels_mask = labels != -100
+                        valid_labels_mask_float = valid_labels_mask.float()
+                        amount_masked = torch.sum(valid_labels_mask_float, dim=1)
+                        # Avoid division by 0 in case no words are masked
+                        amount_masked = amount_masked.masked_fill_(amount_masked == 0, 1.)
 
-                    valid_labels_mask = labels != -100
-                    valid_labels_mask_float = valid_labels_mask.float()
-                    total_considered_per_instance = torch.sum(valid_labels_mask_float, dim=1)
-                    total_considered_per_instance = total_considered_per_instance.masked_fill_(total_considered_per_instance == 0, 1.)
-                    labels_adjusted = labels.clone()
-                    labels_adjusted[~valid_labels_mask] = 0 
+                        # Calculate correctness per instance
+                        predicted_token_ids = torch.argmax(logits, dim=-1)
+                        correct_predictions_mask = (predicted_token_ids == labels) & valid_labels_mask
+                        correct_predictions = torch.sum(correct_predictions_mask.float(), dim=1)
+                        correctness_batch = correct_predictions / amount_masked
+                        correctness[insert_idx : insert_idx_batch] = correctness_batch.detach().cpu().numpy()
 
-                    correct_token_probs = torch.gather(softmax_logits, dim=-1, index=labels_adjusted.unsqueeze(-1))
-                    log_probs = torch.log(softmax_logits + 1e-7) 
-                    entropy = -torch.sum(softmax_logits * log_probs, dim=-1)
+                        # Gather correct token prediction probabilities
+                        labels_adjusted = labels.clone()
+                        labels_adjusted[~valid_labels_mask] = 0 
+                        label_probabilities = torch.gather(softmax_logits, dim=-1, index=labels_adjusted.unsqueeze(-1))
 
-                    mean_probs = torch.sum(correct_token_probs.squeeze(-1) * valid_labels_mask_float, dim=1) / total_considered_per_instance
-                    mean_entr = torch.sum(entropy * valid_labels_mask_float, dim=1) / total_considered_per_instance
-                    
-                    mean_entropy[insert_idx : insert_idx_batch] = mean_entr.detach().cpu().numpy()
-                    mean_confidence[insert_idx : insert_idx_batch] = mean_probs.detach().cpu().numpy()
+                        # Calculate mean confidence
+                        summed_confidence = torch.sum(label_probabilities.squeeze(-1) * valid_labels_mask_float, dim=1)
+                        mean_confidence_batch =  summed_confidence / amount_masked
+                        confidence[insert_idx : insert_idx_batch] = mean_confidence_batch.detach().cpu().numpy()
+        
+                        # Calculate entropy
+                        log_probs = torch.log(softmax_logits + 1e-7) 
+                        entropy_batch = -torch.sum(softmax_logits * log_probs, dim=-1)
+                        mean_entropy_batch = torch.sum(entropy_batch * valid_labels_mask_float, dim=1) / amount_masked
+                        entropy[insert_idx : insert_idx_batch] = mean_entropy_batch.detach().cpu().numpy()
 
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
@@ -439,15 +490,15 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                         if save_thread is not None:
                             save_thread.join()
 
-                        offset = (step + 1 - args.logging_steps * args.gradient_accumulation_steps) * args.train_batch_size
+                        offset = (step + 1 - args.logging_steps) * args.train_batch_size
                         
-                        mean_confidence_copy = mean_confidence.copy()
-                        mean_entropy_copy = mean_entropy.copy()
+                        correctness_copy = correctness.copy()
+                        confidence_copy = confidence.copy()
+                        entropy_copy = entropy.copy()
 
-                        save_thread = threading.Thread(target=add_confidence_batch, 
-                                                    args=(args, os.path.join(args.output_dir, "single_dynamics.hdf5"), offset, mean_confidence_copy, mean_entropy_copy))
+                        save_thread = threading.Thread(target=async_save_dynamics, 
+                                                    args=(args, args.dynamics_path, offset, correctness_copy, confidence_copy, entropy_copy, args.train_batch_size))
                         save_thread.start()
-                    
 
                     t_elapse = time.time() - t_start
 
@@ -491,113 +542,15 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
             os.makedirs(ckpt_dir, exist_ok=True)
             save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler, scaler)
-            break
-        
-        # Always end after single epoch
-        checkpoint_name = f"checkpoint-{global_step:08d}"
-        ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
-        os.makedirs(ckpt_dir, exist_ok=True)
-        save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler, scaler)
-        break
-    
-    tb_writer.close()
-
-def evaluate_train(args, train_dataset, instance_list, eval_run, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix=""):
-    set_seed(args) 
-    def collate(examples: List[torch.Tensor]):
-        if tokenizer._pad_token is None:
-            return pad_sequence(examples, batch_first=True)
-        return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)
-
-    # Eval!
-    logger.info("***** Running evaluation {} *****".format(prefix))
-    logger.info("  Num examples = %d", len(train_dataset))
-    logger.info("  Batch size = %d", args.eval_batch_size)
-    model.eval()
-
-    train_sampler = CustomSampler(instance_list)
-
-    train_dataloader = DataLoader(
-        train_dataset, sampler=train_sampler, shuffle=False, num_workers=2,
-        batch_size=args.eval_batch_size, collate_fn=collate, pin_memory=True
-    )
-
-    correctness = np.zeros((args.logging_steps * args.eval_batch_size), dtype=np.float32)
-    mean_confidence = np.zeros((args.logging_steps * args.eval_batch_size), dtype=np.float32)
-    geom_mean_confidence = np.zeros((args.logging_steps * args.eval_batch_size), dtype=np.float32)
-
-    save_thread = None
-    for step, batch in enumerate(tqdm(train_dataloader, desc="Evaluating", ncols=100)):
-    
-        inputs, labels, _ = mask_tokens(batch, tokenizer, args)
-        inputs = inputs.to(args.device)
-        labels = labels.to(args.device)
-
-        # If some of the input is padded, then the attention mask is needed
-        attention_mask = (inputs != tokenizer.pad_token_id)  # word_tokens --> 1, pad_token --> 0
-        if attention_mask.all():
-            attention_mask = None
-
-        with torch.no_grad():
-            with autocast():
-                outputs = model(inputs, attention_mask=attention_mask, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
-    
-            logits = outputs['logits']
-            
-            insert_idx = (step % args.logging_steps) * args.eval_batch_size 
-            insert_idx_batch = insert_idx + args.eval_batch_size
-            softmax_logits = torch.softmax(logits, dim=-1)  
-            valid_labels_mask = labels != -100
-            valid_labels_mask_float = valid_labels_mask.float()
-
-            # Calculate correctness per instance
-            predicted_token_ids = torch.argmax(logits, dim=-1)
-            correct_predictions_mask = (predicted_token_ids == labels) & valid_labels_mask
-            correct_predictions_per_instance = torch.sum(correct_predictions_mask.float(), dim=1)
-            total_considered_per_instance = torch.sum(valid_labels_mask_float, dim=1)
-
-            # Avoid division by 0 in case no words are masked
-            total_considered_per_instance = total_considered_per_instance.masked_fill_(total_considered_per_instance == 0, 1.)
-            correctness_per_instance = correct_predictions_per_instance / total_considered_per_instance
-            
-            # Gather correct token prediction probabilities
-            labels_adjusted = labels.clone()
-            labels_adjusted[~valid_labels_mask] = 0 
-            correct_token_probs = torch.gather(softmax_logits, dim=-1, index=labels_adjusted.unsqueeze(-1))
-
-            # Calculate mean confidence
-            sum_probs = torch.sum(correct_token_probs.squeeze(-1) * valid_labels_mask_float, dim=1)
-            mean_probs = sum_probs / total_considered_per_instance
-
-            # Calculate geometric mean in log-space to mitigate underflow
-            log_probs = torch.log(correct_token_probs.squeeze(-1) + 1e-7)
-            sum_log_probs = torch.sum(log_probs * valid_labels_mask, dim=1)
-            geom_mean_log = sum_log_probs / total_considered_per_instance
-            geom_mean_probs = torch.exp(geom_mean_log)               
-
-            correctness[insert_idx : insert_idx_batch] = correctness_per_instance.detach().cpu().numpy()
-            mean_confidence[insert_idx : insert_idx_batch] = mean_probs.detach().cpu().numpy()
-            geom_mean_confidence[insert_idx : insert_idx_batch] = geom_mean_probs.detach().cpu().numpy()
-
-        if (step + 1) % args.logging_steps == 0 and step > 0:
-            
             if save_thread is not None:
                 save_thread.join()
-
-            offset = (step + 1 - args.logging_steps) * args.eval_batch_size
-            
-            correctness_copy = correctness.copy()
-            mean_confidence_copy = mean_confidence.copy()
-            geom_mean_confidence_copy = geom_mean_confidence.copy()
-            save_thread = threading.Thread(target=async_add_probs_batch, 
-                                           args=(args, args.output_dir, offset, correctness_copy, mean_confidence_copy, geom_mean_confidence_copy, eval_run))
-            save_thread.start()
-        
-        if step + 1 >= args.max_steps:
             break
-    
-    if save_thread is not None:
-        save_thread.join()
+        
+        # Always end after single epoc
+        if save_thread is not None:
+            save_thread.join()
+
+    tb_writer.close()
 
 def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix="") -> Dict:
     # Loop to handle MNLI double evaluation (matched, mis-matched)
@@ -622,7 +575,7 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
     model.eval()
 
     for batch in tqdm(eval_dataloader, desc="Evaluating", ncols=100):
-        inputs, labels, _ = mask_tokens(batch, tokenizer, args)
+        inputs, labels = mask_tokens(batch, tokenizer, args)
         inputs = inputs.to(args.device)
         labels = labels.to(args.device)
         # If some of the input is padded, then the attention mask is needed
@@ -643,81 +596,173 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
 
     return result
 
+def compute_ckpt_dynamics(args, train_dataset, instances, ckpt_nr, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix=""):
+    set_seed(args.seed) 
+    def collate(examples: List[Tuple[torch.Tensor, torch.Tensor]]):
+        tokens, masks = zip(*examples)  
+        
+        if tokenizer._pad_token is None:
+            padded_tokens = pad_sequence(tokens, batch_first=True)
+        else:
+            padded_tokens = pad_sequence(tokens, batch_first=True, padding_value=tokenizer.pad_token_id)
+        
+        padded_masks = pad_sequence(masks, batch_first=True, padding_value=0)
+        return padded_tokens, padded_masks
+    # Eval!
+    logger.info("***** Running evaluation {} *****".format(prefix))
+    logger.info("  Num examples = %d", len(train_dataset))
+    logger.info("  Batch size = %d", args.eval_batch_size)
+    model.eval()
+
+    train_sampler = CustomSampler(instances)
+    train_dataloader = DataLoader(
+        train_dataset, sampler=train_sampler, shuffle=False, num_workers=2,
+        batch_size=args.eval_batch_size, collate_fn=collate, pin_memory=True
+    )
+
+    correctness = np.zeros((args.logging_steps * args.eval_batch_size), dtype=np.float32)
+    confidence = np.zeros((args.logging_steps * args.eval_batch_size), dtype=np.float32)
+    entropy = np.zeros((args.logging_steps * args.eval_batch_size), dtype=np.float32)
+
+    print()
+    print(instances)
+    print()
+    save_thread = None
+    for step, batch in enumerate(tqdm(train_dataloader, desc="Evaluating", ncols=100)):
+    
+        inputs, labels = mask_inputs(batch[0], batch[1], tokenizer)
+        inputs = inputs.to(args.device)
+        labels = labels.to(args.device)
+        # If some of the input is padded, then the attention mask is needed
+        attention_mask = (inputs != tokenizer.pad_token_id)  # word_tokens --> 1, pad_token --> 0
+        if attention_mask.all():
+            attention_mask = None
+
+        with torch.no_grad():
+            with autocast():
+                outputs = model(inputs, attention_mask=attention_mask, masked_lm_labels=labels)
+    
+            logits = outputs['logits']
+            softmax_logits = torch.softmax(logits, dim=-1)  
+
+            insert_idx = (step % args.logging_steps) * args.eval_batch_size 
+            insert_idx_batch = insert_idx + args.eval_batch_size
+
+            valid_labels_mask = labels != -100
+            valid_labels_mask_float = valid_labels_mask.float()
+            amount_masked = torch.sum(valid_labels_mask_float, dim=1)
+            # Avoid division by 0 in case no words are masked
+            amount_masked = amount_masked.masked_fill_(amount_masked == 0, 1.)
+
+            # Calculate correctness per instance
+            predicted_token_ids = torch.argmax(logits, dim=-1)
+            correct_predictions_mask = (predicted_token_ids == labels) & valid_labels_mask
+            correct_predictions = torch.sum(correct_predictions_mask.float(), dim=1)
+            correctness_batch = correct_predictions / amount_masked
+            correctness[insert_idx : insert_idx_batch] = correctness_batch.detach().cpu().numpy()
+
+            # Calculate mean confidence
+            labels_adjusted = labels.clone()
+            labels_adjusted[~valid_labels_mask] = 0 
+            label_probabilities = torch.gather(softmax_logits, dim=-1, index=labels_adjusted.unsqueeze(-1))
+            summed_confidence = torch.sum(label_probabilities.squeeze(-1) * valid_labels_mask_float, dim=1)
+            mean_confidence_batch =  summed_confidence / amount_masked
+            confidence[insert_idx : insert_idx_batch] = mean_confidence_batch.detach().cpu().numpy()
+
+            # Calculate entropy
+            log_probs = torch.log(softmax_logits + 1e-7) 
+            entropy_batch = -torch.sum(softmax_logits * log_probs, dim=-1)
+            mean_entropy_batch = torch.sum(entropy_batch * valid_labels_mask_float, dim=1) / amount_masked
+            entropy[insert_idx : insert_idx_batch] = mean_entropy_batch.detach().cpu().numpy()
+
+        if (step + 1) % args.logging_steps == 0 and step > 0:
+            
+            if save_thread is not None:
+                save_thread.join()
+
+            offset = (step + 1 - args.logging_steps) * args.eval_batch_size
+            
+            correctness_copy = correctness.copy()
+            confidence_copy = confidence.copy()
+            entropy_copy = entropy.copy()
+
+            save_thread = threading.Thread(target=async_save_dynamics, 
+                                           args=(args, args.dynamics_path, offset, correctness_copy, confidence_copy, entropy_copy, args.eval_batch_size, ckpt_nr))
+            save_thread.start()
+        
+        if step + 1 >= args.max_steps:
+            break
+    
+    if save_thread is not None:
+        save_thread.join()
+
 def compute_dynamics(args, train_dataset, tokenizer):
 
-    # Setup logging
-        logging.basicConfig(
-            format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
-            datefmt="%m/%d/%Y %H:%M:%S",
-            level=logging.INFO
+    config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
+    ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
+
+    checkpoint_names = []
+    model_names = []
+    if os.path.isdir(ckpt_dir):
+        checkpoint_names = [fn for fn in os.listdir(ckpt_dir) if fn.startswith('checkpoint-')]
+        logger.info(f"Checkpoints detected: {len(checkpoint_names)}")
+    if len(checkpoint_names) > 0:
+        checkpoint_names = sorted(checkpoint_names, key=lambda p: int(p.split('-')[-1]))
+        for i, ckpt_name in enumerate(checkpoint_names):
+            model_names.append(os.path.join(ckpt_dir, ckpt_name))
+    else:
+        logger.warning(f"No checkpoint detected: {ckpt_dir}")
+        return -1
+
+    assert args.block_size <= tokenizer.model_max_length
+
+    if args.config_name:
+        config = config_class.from_pretrained(args.config_name, cache_dir=args.cache_dir)
+    elif args.model_name_or_path:
+        config = config_class.from_pretrained(args.model_name_or_path, cache_dir=args.cache_dir)
+    else:
+        raise ValueError(
+            "Why do you want the default config?? Please use --config_name or --model_name_or_path"
         )
-        config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
-        ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
 
-        checkpoint_names = []
-        model_names = []
-        if os.path.isdir(ckpt_dir):
-            checkpoint_names = [fn for fn in os.listdir(ckpt_dir) if fn.startswith('checkpoint-')]
-        if len(checkpoint_names) > 0:
-            checkpoint_names = sorted(checkpoint_names, key=lambda p: int(p.split('-')[-1]))
-            for i, ckpt_name in enumerate(checkpoint_names):
-                model_names.append(os.path.join(ckpt_dir, ckpt_name))
-        else:
-            logger.warning('No checkpoint detected: %s', ckpt_dir)
-            return -1
+    args.instance_data_path = os.path.join(args.output_dir, "instance_data.hdf5")
+    with h5py.File(args.instance_data_path, 'r') as f:
+        instances = f['instance_order'][:]
 
-        assert args.block_size <= tokenizer.model_max_length
+    logger.info(f"Computing dynamics from: {args.instance_data_path}")
 
-        # Get Config
-        if args.config_name:
-            config = config_class.from_pretrained(args.config_name, cache_dir=args.cache_dir)
-        elif args.model_name_or_path:
-            config = config_class.from_pretrained(args.model_name_or_path, cache_dir=args.cache_dir)
-        else:
-            raise ValueError(
-                "Why do you want the default config?? Please use --config_name or --model_name_or_path"
-            )
-        
-        if args.dynamics_path == "none":
-            args.dynamics_path = args.output_dir
-            args.output_dir = os.path.join(args.output_dir, f"dynamics_eval_{args.seed}.hdf5")
-        else:
-            args.output_dir = os.path.join(args.output_dir, f"dynamics_eval_unseen_{args.seed}.hdf5")
+    instance_amount = len(instances) 
 
-        data = load_train_data_from_hdf5(os.path.join(args.dynamics_path, "instances_masks.hdf5"))
-        instance_list = data['instance_order']
+    for i in args.dynamics_ckpts_list:
 
-        args.max_steps = len(instance_list) // args.eval_batch_size
-        args.logging_steps *= args.gradient_accumulation_steps
+        with h5py.File(args.dynamics_path, 'a') as f:
+            dataset_names = [
+                f"confidence_ckpt_{i}",
+                f"correctness_ckpt_{i}",
+                f"entropy_ckpt_{i}"
+            ]
 
-        if not os.path.isfile(args.output_dir):
-            initialize_hdf5_file_eval(args.output_dir, args.max_steps * args.eval_batch_size,  len(model_names))
-        
-        eval_thread = None
-        for i in args.dynamics_ckpts_list:
-
-                if eval_thread is not None:
-                    eval_thread.join()
-
-                args.model_name_or_path = model_names[i]
-                print(f"Evaluating {args.model_name_or_path} for {args.max_steps} steps.")
-
-                model = model_class.from_pretrained(
-                    args.model_name_or_path,
-                    from_tf=bool(".ckpt" in args.model_name_or_path),
-                    config=config,
-                    cache_dir=args.cache_dir,
-                    args=args
-                )
-                model.to(args.device)
+            for dataset_name in dataset_names:
+                if dataset_name in f:
+                    del f[dataset_name]
                 
-                #eval_thread = threading.Thread(target=evaluate_train, args=(args, train_dataset, instance_list, i, model, tokenizer))
-                #eval_thread.start()
-                evaluate_train(args, train_dataset, instance_list, i, model, tokenizer)
+                f.create_dataset(dataset_name, shape=(instance_amount), dtype=np.float32)
 
-        if eval_thread is not None:
-            eval_thread.join()
+        if i < len(model_names) and i > 0:
+            args.model_name_or_path = model_names[i]
+        else:
+            logger.warning(f"Invalid checkpoint chosen. Valid Checkpoints: 1-{len(model_names)}")
+        logger.info(f"Evaluating {args.model_name_or_path} for {args.max_steps} steps.")
 
+        model = model_class.from_pretrained(
+            args.model_name_or_path,
+            from_tf=bool(".ckpt" in args.model_name_or_path),
+            config=config,
+            cache_dir=args.cache_dir,
+            args=args
+        )
+        model.to(args.device)
+        compute_ckpt_dynamics(args, train_dataset, instances, i, model, tokenizer)
 
 def save_model(args, ckpt_dir, name, model, tokenizer, optimizer, scheduler, scaler):
     # Save model checkpoint
@@ -736,12 +781,6 @@ def save_model(args, ckpt_dir, name, model, tokenizer, optimizer, scheduler, sca
     logger.info("Saving optimizer and scheduler states to %s", output_dir)
 
 def get_model_tokenizer(args):
-        # Setup logging
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO
-    )
 
     if args.should_continue:
         ckpt_dir = os.path.join(args.output_dir, 'checkpoints')
@@ -756,7 +795,7 @@ def get_model_tokenizer(args):
             args.model_name_or_path = None
 
     # Set seed
-    set_seed(args)
+    set_seed(args.seed)
     # Load pretrained model and token
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
 
@@ -823,32 +862,39 @@ def get_model_tokenizer(args):
         logger.info("Training new model from scratch")
         model = model_class(config=config, args=args)
 
-    print(model)
+    logger.info(model)
     return model, tokenizer
 
 def main():
     parser = process_args()
     args = parser.parse_args()
-    set_seed(args)
-
+    args.mask_path = os.path.join(args.mask_path, f"mask-set-{args.mask_set}.hdf5")
+    
+    if args.dynamics_path is None:
+        args.dynamics_path = os.path.join(args.output_dir, f"dynamics_data_{args.mask_set}.hdf5")
+    
     args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, tokenizer = get_model_tokenizer(args)
-    train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
 
-    train_thread = None
-    # Training
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO
+    )
+    model, tokenizer = get_model_tokenizer(args)
+
+    if args.generate_masks:
+        train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
+        generate_masks(args, train_dataset, tokenizer)
+        args.generate_masks = False
+
     if args.do_train:
+        train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
         model.to(args.device)
         train(args, train_dataset, model, tokenizer)
-        #train_thread = threading.Thread(target=train, args=(args, train_dataset, model, tokenizer))
-        #train_thread.start()
 
-    if args.compute_dynamics:
-        args.dynamics_ckpts_list = [5, 10]
+    if args.compute_dynamics:  
+        train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
         compute_dynamics(args, train_dataset, tokenizer)
-
-    if train_thread is not None:
-        train_thread.join()
 
 if __name__ == "__main__":
     main()
