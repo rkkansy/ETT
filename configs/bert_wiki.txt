@@ -2,11 +2,11 @@ tokenizer_name = bert-base-uncased
 model_type = bert
 block_size = 126
 
-train_data_file = project/data/en.train.raw
-train_data_file_bc = project/data/en-bc.train.raw
+train_data_file = /project/data/en.train.raw
+train_data_file_bc = /project/data/en-bc.train.raw
 do_eval = True
-eval_data_file = project/data/en.valid.raw
-mask_path = project/data/mask-data
+eval_data_file = /project/data/en.valid.raw
+mask_path = /project/data/mask-data
 
 col_data = True
 split_sent = True

@@ -205,11 +205,13 @@ def generate_masks(args, train_dataset, tokenizer: PreTrainedTokenizer):
 
         masks[insert_idx : insert_idx + args.train_batch_size] = operation_mask
 
+        # Implement thread pool to save data faster
         if (step + 1) % args.logging_steps == 0:
             if save_thread is not None:
                 save_thread.join()
             offset = (step + 1 - args.logging_steps) * args.train_batch_size
-            save_thread = threading.Thread(target=async_save_masks, args=(args.mask_path, offset,  masks))
+            masks_copy = masks.copy()
+            save_thread = threading.Thread(target=async_save_masks, args=(args.mask_path, offset, masks_copy))
             save_thread.start()
 
     save_thread.join()
