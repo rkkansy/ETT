@@ -355,7 +355,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             with h5py.File(os.path.join(args.output_dir, "instance_data.hdf5"), 'a') as f:
                 f.create_dataset(f"instance_order", data=instances, dtype=np.int32)
         else:
-            instances = list(range(len(train_dataset)))[:-args.train_bratch_size*100]
+            instances = list(range(len(train_dataset)))[:-args.train_batch_size*100]
             if len(instances) < epoch_size:
                 random.shuffle(instances)
                 instances = instances[:epoch_size]
