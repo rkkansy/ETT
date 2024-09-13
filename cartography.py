@@ -253,19 +253,7 @@ def eval(args):
 
     confidence = data_eval['mean_confidence']
     entropy = data_eval['mean_entropy']
-
-    mean_confidences_top_indices = select_top_indices(confidence)
-    mean_entropy_top_indices = select_top_indices(entropy)
-
-    mean_confidences_bottom_indices = select_bottom_indices(confidence)
-    mean_entropy_bottom_indices = select_bottom_indices(entropy)
-
-    mean_easy_instances = instance_order[mean_confidences_top_indices]
-    seed_mean_easy_instances = instance_order[mean_entropy_top_indices]
-
-    mean_hard_instances = instance_order[mean_confidences_bottom_indices]
-    mean_entropy_hard_instances = instance_order[mean_entropy_bottom_indices]
-
+    
     mini_batch_size = 96
     gradient_acc = 16
     batch_size = mini_batch_size * gradient_acc
@@ -287,11 +275,6 @@ def eval(args):
         for j in range(total_steps):
             sorted_confidence.append(sorted_confidence_batches[j][i] + j * batch_size)
             sorted_entropy.append(sorted_entropy_batches[j][i] + j * batch_size)
-
-    sorted_confidence_top_indices_10 = select_top_indices(confidence[sorted_confidence[:total_steps*10]])
-    sorted_confidence_top_indices_20 = select_top_indices(confidence[sorted_confidence[:total_steps*20]])
-    sorted_confidence_top_indices_50 = select_top_indices(confidence[sorted_confidence[:total_steps*50]])
-
 
     plot_confidence_sorted = []
     plot_confidence = []
@@ -336,7 +319,12 @@ def get_percent_indices(confidences, percent):
     sorted_indices = np.argsort(confidences)
     return sorted_indices[:num_elements], sorted_indices[-num_elements:]
 
-def plot_metrics(step_size, confidence, entropy, variability, correctness):
+def plot_metrics(data, step_size=1000):
+
+    confidence = data["confidence"] 
+    entropy = data["entropy"]
+    variability = data["variability"] 
+    correctness = data["correctness"]
     # Create a colormap and normalize based on the correctness values
     cmap = plt.cm.viridis  # You can change this to any other colormap as needed (e.g., plt.cm.coolwarm)
     norm = plt.Normalize(vmin=0, vmax=1)  # Assuming correctness ranges from 0 to 1
@@ -374,7 +362,6 @@ def plot_metrics(step_size, confidence, entropy, variability, correctness):
 
     plt.tight_layout()
     plt.show()
-
 
 def compute_dynamics(args, ckpts, mask_set):
 
@@ -504,37 +491,9 @@ def compare_masks(args):
 def main():
     parser = process_args()
     args = parser.parse_args()
-    for i in range(2, 5):
-        dynamics = compute_dynamics(args, [i], 1)
-        dynamics1 = compute_dynamics(args, [i], 2)
-        train_batch_size = 64
-        checkpoint_amount = i*1000*train_batch_size
 
-        print(len(dynamics["confidence"]))
-        print(len(dynamics1["confidence"]))
-
-        print(np.mean(dynamics["confidence"][:checkpoint_amount]), np.mean(dynamics1["confidence"][:checkpoint_amount]))
-        print(np.mean(dynamics["entropy"][:checkpoint_amount]), np.mean(dynamics1["entropy"][:checkpoint_amount]))
-        print(np.mean(dynamics["correctness"][:checkpoint_amount]), np.mean(dynamics1["correctness"][:checkpoint_amount]))
-        print(np.mean(dynamics["variability"][:checkpoint_amount]), np.mean(dynamics1["variability"][:checkpoint_amount]))
-
-        print(np.mean(dynamics["confidence"][checkpoint_amount:]), np.mean(dynamics1["confidence"][checkpoint_amount:]))
-        print(np.mean(dynamics["entropy"][checkpoint_amount:]), np.mean(dynamics1["entropy"][checkpoint_amount:]))
-        print(np.mean(dynamics["correctness"][checkpoint_amount:]), np.mean(dynamics1["correctness"][checkpoint_amount:]))
-        print(np.mean(dynamics["variability"][checkpoint_amount:]), np.mean(dynamics1["variability"][checkpoint_amount:]))
-    compare_masks(args)
-    #print(confidence_list)
-    #print(entropy_list)
-    #print(correctness_list)
-
-    #plot_metrics(confidence, entropy, variability, correctness)
-
-
-# Usage
-    #directory_path = '/home/robert/Documents/ETT/logs'  # Change this to the path of your log files
-    #log_files_data = load_log_data(directory_path)
-    #plot_train_loss(log_files_data, y_limits=(1.5, 4))
-    #compare_dynamics(args)
+    res = compute_dynamics(args, [1, 2], args.mask_set)
+    plot_metrics(res, 100)
 
 if __name__ == "__main__":
     main()

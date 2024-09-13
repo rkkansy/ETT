@@ -158,7 +158,10 @@ def generate_masks(args, train_dataset, tokenizer: PreTrainedTokenizer):
 
     global_step = 0
     instances = list(range(len(train_dataset)))
-
+    # Limit the instances so only full batches are computed
+    amount_batches = len(instances) // args.eval_batch_size
+    instances = instances[:amount_batches * args.eval_batch_size]
+    
     with h5py.File(args.mask_path, 'a') as f:
         f.create_dataset("masks", shape=(len(instances), 128), dtype=np.int16)
 
@@ -357,7 +360,8 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                     del f["instance_order"]
                 f.create_dataset(f"instance_order", data=instances, dtype=np.int32)
         else:
-            instances = list(range(len(train_dataset)))[:-args.train_batch_size*100]
+            # Only select instances tha have a corresponding mask
+            instances = list(range(len(train_dataset)))[:len(h5py.File(args.mask_path, 'r')['masks'])]
             if len(instances) > epoch_size:
                 random.shuffle(instances)
                 instances = instances[:epoch_size]
@@ -704,9 +708,6 @@ def compute_ckpt_dynamics(args, train_dataset, instances, ckpt_nr, model: PreTra
             save_thread = threading.Thread(target=async_save_dynamics, 
                                            args=(args, args.dynamics_path, offset, correctness_copy, confidence_copy, entropy_copy, args.eval_batch_size, ckpt_nr))
             save_thread.start()
-        
-        if step + 1 >= args.max_steps:
-            break
     
     if save_thread is not None:
         save_thread.join()
@@ -778,7 +779,7 @@ def compute_dynamics(args, train_dataset, tokenizer):
         )
         model.to(args.device)
         args.gradient_accumulation_steps = 1
-        
+
         compute_ckpt_dynamics(args, train_dataset, instances, i, model, tokenizer)
 
 def save_model(args, ckpt_dir, name, model, tokenizer, optimizer, scheduler, scaler):
