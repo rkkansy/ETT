@@ -28,7 +28,7 @@ def async_save_dynamics(args, filename, offset, correctness, confidence, entropy
             f[f"entropy_ckpt_{eval_epoch}"][i + offset] = entropy[i]
     
     print()
-    print(f"Saved Batches for checkpoint: {eval_epoch} | {offset // batch_size} - {args.logging_steps + offset // batch_size}")
+    print(f"Saved Batches for checkpoint: {eval_epoch} | {offset // batch_size} - {args.logging_steps * args.gradient_accumulation_steps + offset // batch_size}")
 
 def async_save_masks(filename, offset, masks):
     with h5py.File(filename, 'a') as f:
