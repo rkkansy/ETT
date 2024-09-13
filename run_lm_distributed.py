@@ -391,9 +391,16 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     )
     if args.get_dynamics:
         with h5py.File(args.dynamics_path, 'a') as f:
-            f.create_dataset("confidence_ckpt_0", shape=(epoch_size), dtype=np.float32)
-            f.create_dataset("entropy_ckpt_0", shape=(epoch_size), dtype=np.float32)
-            f.create_dataset("correctness_ckpt_0", shape=(epoch_size), dtype=np.float32)
+            dataset_names = [
+                f"confidence_ckpt_0",
+                f"correctness_ckpt_0",
+                f"entropy_ckpt_0"
+            ]
+            for dataset_name in dataset_names:
+                if dataset_name in f:
+                    del f[dataset_name]
+                
+                f.create_dataset(dataset_name, shape=(instance_amount), dtype=np.float32)
 
         correctness = np.zeros((args.logging_steps * args.train_batch_size * args.gradient_accumulation_steps), dtype=np.float32)
         confidence = np.zeros((args.logging_steps * args.train_batch_size * args.gradient_accumulation_steps), dtype=np.float32)
