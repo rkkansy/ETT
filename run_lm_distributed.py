@@ -395,9 +395,9 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             f.create_dataset("entropy_ckpt_0", shape=(epoch_size), dtype=np.float32)
             f.create_dataset("correctness_ckpt_0", shape=(epoch_size), dtype=np.float32)
 
-        correctness = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
-        confidence = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
-        entropy = np.zeros((args.logging_steps * args.train_batch_size), dtype=np.float32)
+        correctness = np.zeros((args.logging_steps * args.train_batch_size * args.gradient_accumulation_steps), dtype=np.float32)
+        confidence = np.zeros((args.logging_steps * args.train_batch_size * args.gradient_accumulation_steps), dtype=np.float32)
+        entropy = np.zeros((args.logging_steps * args.train_batch_size * args.gradient_accumulation_steps), dtype=np.float32)
 
     save_thread = None
 
@@ -494,7 +494,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                         if save_thread is not None:
                             save_thread.join()
 
-                        offset = (step + 1 - args.logging_steps) * args.train_batch_size
+                        offset = (step + 1 - args.logging_steps * args.gradient_accumulation_steps) * args.train_batch_size
                         
                         correctness_copy = correctness.copy()
                         confidence_copy = confidence.copy()
