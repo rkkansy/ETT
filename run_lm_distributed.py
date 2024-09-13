@@ -353,6 +353,8 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             logger.info(f"Loading instance indices from: {load_path}")
 
             with h5py.File(os.path.join(args.output_dir, "instance_data.hdf5"), 'a') as f:
+                if "instance_order" in f:
+                    del f["instance_order"]
                 f.create_dataset(f"instance_order", data=instances, dtype=np.int32)
         else:
             instances = list(range(len(train_dataset)))[:-args.train_batch_size*100]
@@ -363,6 +365,8 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                 random.shuffle(instances)
 
             with h5py.File(os.path.join(args.output_dir, "instance_data.hdf5"), 'a') as f:
+                if "instance_order" in f:
+                    del f["instance_order"]
                 f.create_dataset(f"instance_order", data=instances, dtype=np.int32)
     else:
         if args.instance_data_path:
