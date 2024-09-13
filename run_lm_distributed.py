@@ -513,7 +513,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                         if save_thread is not None:
                             save_thread.join()
 
-                        offset = (global_step - args.logging_steps * args.gradient_accumulation_steps) * args.train_batch_size
+                        offset = (global_step * args.gradient_accumulation_steps - args.logging_steps * args.gradient_accumulation_steps) * args.train_batch_size
                         
                         correctness_copy = correctness.copy()
                         confidence_copy = confidence.copy()
