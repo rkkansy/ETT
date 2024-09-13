@@ -356,7 +356,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                 f.create_dataset(f"instance_order", data=instances, dtype=np.int32)
         else:
             instances = list(range(len(train_dataset)))[:-args.train_batch_size*100]
-            if len(instances) < epoch_size:
+            if len(instances) > epoch_size:
                 random.shuffle(instances)
                 instances = instances[:epoch_size]
             else:
