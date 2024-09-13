@@ -148,7 +148,7 @@ def process_args():
 
     # Distributed Training
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
-    parser.add_argument("--nodes", type=int, default=1)
+    parser.add_argument("--partition_frac", type=float, default=0.33)
     parser.add_argument("--mask_set", type=int, default=0)
 
     # Training Dynamics

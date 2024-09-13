@@ -350,11 +350,15 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         os.makedirs(ckpt_dir, exist_ok=True)
         save_model(args, ckpt_dir, checkpoint_name, model, tokenizer, optimizer, scheduler, scaler)
         if args.instance_data_path:
-            load_path = os.path.join(args.instance_data_path, f"{args.data_partition}.hdf5")
+            if args.data_partition == 'instance_data':
+                load_path = os.path.join(args.instance_data_path, f"{args.data_partition}.hdf5")
+            else:
+                load_path = os.path.join(args.instance_data_path, f"partitions_m-{args.mask_set}_{args.partition_frac}")
+                load_path = os.path.join(load_path, f"{args.data_partition}.hdf5")
+
             with h5py.File(load_path, 'r') as f:
                 instances = f['instance_order'][:]
             logger.info(f"Loading instance indices from: {load_path}")
-
             with h5py.File(os.path.join(args.output_dir, "instance_data.hdf5"), 'a') as f:
                 if "instance_order" in f:
                     del f["instance_order"]
@@ -750,19 +754,28 @@ def compute_dynamics(args, train_dataset, tokenizer):
     instance_amount = len(instances) 
 
     for i in args.dynamics_ckpts_list:
-
         with h5py.File(args.dynamics_path, 'a') as f:
             dataset_names = [
                 f"confidence_ckpt_{i}",
                 f"correctness_ckpt_{i}",
                 f"entropy_ckpt_{i}"
             ]
-
-            for dataset_name in dataset_names:
-                if dataset_name in f:
-                    del f[dataset_name]
+            existing_datasets = [name for name in dataset_names if name in f]
+            if existing_datasets:
+                print(f"The following datasets already exist and will be deleted: {existing_datasets}")
+                user_input = input("Do you want to proceed with deletion and creation of new datasets? [y/N] ").strip().lower()
                 
+                if user_input != 'y':
+                    print("No input, aborting.")
+                    sys.exit()
+            
+                for dataset_name in dataset_names:
+                    del f[dataset_name]
+                    print(f"Deleted dataset: {dataset_name}")
+
+            for dataset_name in dataset_names:    
                 f.create_dataset(dataset_name, shape=(instance_amount), dtype=np.float32)
+                print(f"Created dataset: {dataset_name}")
 
         if i < len(model_names) and i > 0:
             args.model_name_or_path = model_names[i]
@@ -886,11 +899,16 @@ def get_model_tokenizer(args):
 def main():
     parser = process_args()
     args = parser.parse_args()
+    #checkpoint_dir = "models/test_model/checkpoints/checkpoint-00000000"
+    #training_args_path = os.path.join(checkpoint_dir, "training_args.bin")
+    #training_args = torch.load(training_args_path)
+    #print(training_args)
+
     args.mask_path = os.path.join(args.mask_path, f"mask-set-{args.mask_set}.hdf5")
     
     if args.dynamics_path is None:
         args.dynamics_path = os.path.join(args.output_dir, f"dynamics_data_{args.mask_set}.hdf5")
-    
+
     args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     logging.basicConfig(

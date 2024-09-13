@@ -253,7 +253,7 @@ def eval(args):
 
     confidence = data_eval['mean_confidence']
     entropy = data_eval['mean_entropy']
-    
+
     mini_batch_size = 96
     gradient_acc = 16
     batch_size = mini_batch_size * gradient_acc
@@ -368,8 +368,15 @@ def compute_dynamics(args, ckpts, mask_set):
     confidence_list = []
     entropy_list = []
     correctness_list = []
+    file_path = os.path.join(args.output_dir, f"dynamics_data_{mask_set}.hdf5")
+
+    with h5py.File(file_path, 'r') as file:
+        print("Datasets in the HDF5 file:")
+        for name in file.keys():
+            print(name)
+
     for i in ckpts:
-        with h5py.File(os.path.join(args.output_dir, f"dynamics_data_{mask_set}.hdf5"), 'r') as f:
+        with h5py.File(file_path, 'r') as f:
             confidence_list.append(f[f'confidence_ckpt_{i}'][:])
             entropy_list.append(f[f'entropy_ckpt_{i}'][:])
             correctness_list.append(f[f'correctness_ckpt_{i}'][:])
@@ -405,14 +412,14 @@ def compute_partitions(args, ckpts, dynamics, mask_set, frac=0.33):
     sorted_ids_variability = np.argsort(dynamics["variability"])
     sorted_ids_entropy = np.argsort(dynamics["entropy"])
 
-    easy_instances = instance_order[sorted_ids_confidence[partition_size:]]
+    easy_instances = instance_order[sorted_ids_confidence[::-1][:partition_size]]
     hard_instances = instance_order[sorted_ids_confidence[:partition_size]]
-    ambiguous_instances = instance_order[sorted_ids_variability[partition_size:]]
+    ambiguous_instances = instance_order[sorted_ids_variability[::-1][:partition_size]]
 
-    high_entropy_instances = instance_order[sorted_ids_entropy[partition_size:]]
+    high_entropy_instances = instance_order[sorted_ids_entropy[::-1][:partition_size]]
     low_entropy_instances = instance_order[sorted_ids_entropy[:partition_size]]
 
-    partition_folder_path = os.path.join(args.output_dir, f"partitions_{mask_set}")
+    partition_folder_path = os.path.join(args.output_dir, f"partitions_m-{mask_set}_{frac}")
 
     os.makedirs(partition_folder_path, exist_ok=True)
 
@@ -435,7 +442,6 @@ def compute_partitions(args, ckpts, dynamics, mask_set, frac=0.33):
         "low_entropy_instances": low_entropy_instances
     }
     return results
-
 
 def evaluate_partitions(partition_data):
     # Extract the partition sets from the results dictionary
@@ -492,7 +498,10 @@ def main():
     parser = process_args()
     args = parser.parse_args()
 
-    res = compute_dynamics(args, [1, 2], args.mask_set)
+    if args.compute_dynamics:
+        res = compute_dynamics(args, args.dynamics_ckpts_list, args.mask_set)
+        compute_partitions(args, args.dynamics_ckpts_list, res, args.mask_set, frac=0.33)
+
     plot_metrics(res, 100)
 
 if __name__ == "__main__":
