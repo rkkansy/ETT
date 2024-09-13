@@ -512,7 +512,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                         entropy_copy = entropy.copy()
 
                         save_thread = threading.Thread(target=async_save_dynamics, 
-                                                    args=(args, args.dynamics_path, offset, correctness_copy, confidence_copy, entropy_copy, batch_size))
+                                                    args=(args, args.dynamics_path, offset, correctness_copy, confidence_copy, entropy_copy, args.train_batch_size))
                         save_thread.start()
 
                     t_elapse = time.time() - t_start
@@ -777,6 +777,8 @@ def compute_dynamics(args, train_dataset, tokenizer):
             args=args
         )
         model.to(args.device)
+        args.gradient_accumulation_steps = 1
+        
         compute_ckpt_dynamics(args, train_dataset, instances, i, model, tokenizer)
 
 def save_model(args, ckpt_dir, name, model, tokenizer, optimizer, scheduler, scaler):
