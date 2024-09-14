@@ -535,25 +535,11 @@ def copy_train_logs(source_root, destination_folder):
             except Exception as e:
                 print(f"Failed to copy {source_file} to {destination_file}. Reason: {e}")
 
-def main():
-    parser = process_args()
-    args = parser.parse_args()
-
-    if args.compute_dynamics:
-        res = compute_dynamics(args, args.dynamics_ckpts_list, args.mask_set)
-        compute_partitions(args, res, args.mask_set, frac=args.partition_frac)
-
-    plot_metrics(args, res, 100)
-
-if __name__ == "__main__":
-    main()
-
-"""
-    for i in range(2, 5):
+def compare_dynamics(args, ckpts):
+    for i in ckpts:
         dynamics = compute_dynamics(args, [i], 1)
         dynamics1 = compute_dynamics(args, [i], 2)
-        train_batch_size = 64
-        checkpoint_amount = i*1000*train_batch_size
+        checkpoint_amount = i * args.gradient_accumulation_steps * args.train_batch_size * args.ckpt_steps
 
         print(len(dynamics["confidence"]))
         print(len(dynamics1["confidence"]))
@@ -567,4 +553,16 @@ if __name__ == "__main__":
         print(np.mean(dynamics["entropy"][checkpoint_amount:]), np.mean(dynamics1["entropy"][checkpoint_amount:]))
         print(np.mean(dynamics["correctness"][checkpoint_amount:]), np.mean(dynamics1["correctness"][checkpoint_amount:]))
         print(np.mean(dynamics["variability"][checkpoint_amount:]), np.mean(dynamics1["variability"][checkpoint_amount:]))
-"""
+
+def main():
+    parser = process_args()
+    args = parser.parse_args()
+
+    if args.compute_dynamics:
+        res = compute_dynamics(args, args.dynamics_ckpts_list, args.mask_set)
+        compute_partitions(args, res, args.mask_set, frac=args.partition_frac)
+
+    plot_metrics(args, res, 100)
+
+if __name__ == "__main__":
+    main()
