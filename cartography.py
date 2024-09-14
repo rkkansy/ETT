@@ -35,6 +35,7 @@ from typing import Dict, List, Tuple
 from datetime import datetime
 import time 
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 
 import numpy as np
 import h5py
@@ -319,49 +320,60 @@ def get_percent_indices(confidences, percent):
     sorted_indices = np.argsort(confidences)
     return sorted_indices[:num_elements], sorted_indices[-num_elements:]
 
-def plot_metrics(data, step_size=1000):
-
-    confidence = data["confidence"] 
+def plot_metrics(args, data, step_size=1000):
+    confidence = data["confidence"]
     entropy = data["entropy"]
-    variability = data["variability"] 
+    variability = data["variability"]
     correctness = data["correctness"]
-    # Create a colormap and normalize based on the correctness values
-    cmap = plt.cm.viridis  # You can change this to any other colormap as needed (e.g., plt.cm.coolwarm)
-    norm = plt.Normalize(vmin=0, vmax=1)  # Assuming correctness ranges from 0 to 1
-    
-    fig, axs = plt.subplots(1, 3, figsize=(18, 6))
 
-    # Select every 1000th entry from each metric
+    # Create colormap and normalize based on the correctness values
+    cmap = plt.cm.viridis  # This can be changed to any other colormap (e.g., plt.cm.coolwarm)
+    norm = plt.Normalize(vmin=0, vmax=1)  # Assuming correctness ranges from 0 to 1
+
+    # Create the directory if it does not exist
+    output_path = os.path.join(args.output_dir, "dynamic_plots")
+    os.makedirs(output_path, exist_ok=True)
+
+    # Select every 'step_size' entry from each metric
     indices = range(0, len(confidence), step_size)
     selected_confidence = [confidence[i] for i in indices]
     selected_entropy = [entropy[i] for i in indices]
     selected_variability = [variability[i] for i in indices]
     selected_correctness = [correctness[i] for i in indices]
 
-    # Scatter plot for Confidence over Entropy
-    sc = axs[0].scatter(selected_entropy, selected_confidence, c=selected_correctness, cmap=cmap, norm=norm, alpha=0.7)
-    axs[0].set_xlabel('Entropy')
-    axs[0].set_ylabel('Confidence')
-    axs[0].set_title('Confidence over Entropy')
-    
-    # Scatter plot for Confidence over Variability
-    axs[1].scatter(selected_variability, selected_confidence, c=selected_correctness, cmap=cmap, norm=norm, alpha=0.7)
-    axs[1].set_xlabel('Variability')
-    axs[1].set_ylabel('Confidence')
-    axs[1].set_title('Confidence over Variability')
-    
-    # Scatter plot for Entropy over Variability
-    axs[2].scatter(selected_variability, selected_entropy, c=selected_correctness, cmap=cmap, norm=norm, alpha=0.7)
-    axs[2].set_xlabel('Variability')
-    axs[2].set_ylabel('Entropy')
-    axs[2].set_title('Entropy over Variability')
-    
-    # Create a colorbar for the scatter plots
-    cbar = fig.colorbar(sc, ax=axs.ravel().tolist(), shrink=0.95)
-    cbar.set_label('Correctness')
+    # Function to create and save scatter plots and histograms together
+    def create_and_save_plot(x, y, xlabel, ylabel, title, filename):
+        # Setting up the grid
+        fig = plt.figure(figsize=(12, 6))
+        gs = gridspec.GridSpec(1, 2, width_ratios=[3, 1])  # Control the width ratio of scatter to histogram
 
-    plt.tight_layout()
-    plt.show()
+        # Scatter plot
+        ax1 = fig.add_subplot(gs[0])
+        sc = ax1.scatter(x, y, c=selected_correctness, cmap=cmap, norm=norm, alpha=0.7)
+        ax1.set_xlabel(xlabel)
+        ax1.set_ylabel(ylabel)
+        ax1.set_title(title)
+
+        # Colorbar for correctness
+        cbar = fig.colorbar(sc, ax=ax1)
+        cbar.set_label('Correctness')
+
+        # Histogram for the x-axis values
+        ax2 = fig.add_subplot(gs[1])
+        ax2.hist(x, bins=20, alpha=0.3, color='grey')
+        ax2.set_xlabel(xlabel)
+        ax2.set_ylabel('Density')
+        ax2.set_title(f'Density of {xlabel}')
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_path, filename))
+        plt.close()
+
+    # Generate plots
+    create_and_save_plot(selected_entropy, selected_confidence, 'Entropy', 'Confidence', 'Confidence over Entropy', 'conf_vs_entropy.png')
+    create_and_save_plot(selected_variability, selected_confidence, 'Variability', 'Confidence', 'Confidence over Variability', 'conf_vs_variability.png')
+    create_and_save_plot(selected_entropy, selected_variability, 'Entropy', 'Variability', 'Entropy over Variability', 'entropy_vs_variability.png')
+
 
 def compute_dynamics(args, ckpts, mask_set):
 
@@ -382,7 +394,8 @@ def compute_dynamics(args, ckpts, mask_set):
             correctness_list.append(f[f'correctness_ckpt_{i}'][:])
             if args.verbose:
                 print()
-                print(f"correctness at checkpoint {i}: ", f[f'correctness_ckpt_{i}'][:])
+                print(f"Length of datasets: {len(f[f'correctness_ckpt_{i}'][:])}")
+                print(f"Correctness at checkpoint {i}: ", f[f'correctness_ckpt_{i}'][:])
                 print(f"Entropy at checkpoint {i}: ", f[f'entropy_ckpt_{i}'][:])
                 print(f"Confidence at checkpoint {i}: ", f[f'confidence_ckpt_{i}'][:])
 
@@ -390,7 +403,7 @@ def compute_dynamics(args, ckpts, mask_set):
     confidence = np.mean(confidence_list, axis=0)
     entropy = np.mean(entropy_list, axis=0)
     correctness = np.mean(correctness_list, axis=0)
-    variability = np.std(confidence_list, axis=0)
+    variability = np.var(confidence_list, axis=0)
 
     results = {
         "confidence": confidence,
@@ -494,15 +507,45 @@ def compare_masks(args):
     else:
         print("Skipping content comparison due to differing shapes.")
 
+def copy_train_logs(source_root, destination_folder):
+    """
+    Traverse through source_root and its subdirectories to find 'train_log.txt' files.
+    Copy each found file to destination_folder, renaming it based on its subdirectory.
+
+    :param source_root: The root directory to start searching from.
+    :param destination_folder: The directory where renamed files will be saved.
+    """
+    # Ensure the destination folder exists
+    os.makedirs(destination_folder, exist_ok=True)
+    print(f"Destination folder set to: {destination_folder}")
+
+    # Walk through all subdirectories
+    for dirpath, dirnames, filenames in os.walk(source_root):
+        if 'train_log.txt' in filenames:
+            # Get the name of the current subdirectory
+            subdirectory = os.path.basename(dirpath)
+            source_file = os.path.join(dirpath, 'train_log.txt')
+            
+            # Define the new file name
+            # To ensure uniqueness, you can include the relative path or use other strategies
+            new_file_name = f"{subdirectory}_train_log.txt"
+            destination_file = os.path.join(destination_folder, new_file_name)
+            
+            try:
+                shutil.copy2(source_file, destination_file)
+                print(f"Copied: {source_file} -> {destination_file}")
+            except Exception as e:
+                print(f"Failed to copy {source_file} to {destination_file}. Reason: {e}")
+
 def main():
     parser = process_args()
     args = parser.parse_args()
 
     if args.compute_dynamics:
         res = compute_dynamics(args, args.dynamics_ckpts_list, args.mask_set)
-        compute_partitions(args, args.dynamics_ckpts_list, res, args.mask_set, frac=0.33)
+        compute_partitions(args, args.dynamics_ckpts_list, res, args.mask_set, frac=args.partition_frac)
 
-    plot_metrics(res, 100)
+    plot_metrics(args, res, 100)
 
 if __name__ == "__main__":
     main()

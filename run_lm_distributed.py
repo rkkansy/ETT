@@ -379,7 +379,11 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                 f.create_dataset(f"instance_order", data=instances, dtype=np.int32)
     else:
         if args.instance_data_path:
-            load_path = os.path.join(args.instance_data_path, f"{args.data_partition}.hdf5")
+            if args.data_partition == 'instance_data':
+                load_path = os.path.join(args.instance_data_path, f"{args.data_partition}.hdf5")
+            else:
+                load_path = os.path.join(args.instance_data_path, f"partitions_m-{args.mask_set}_{args.partition_frac}")
+                load_path = os.path.join(load_path, f"{args.data_partition}.hdf5")
         else:
             load_path = os.path.join(args.output_dir, "instance_data.hdf5")
 
@@ -830,12 +834,11 @@ def get_model_tokenizer(args):
     set_seed(args.seed)
     # Load pretrained model and token
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
-    tokenizer_path = '/configs/tokenizer/'  # Adjust this path
     # Load Config
 
     # Get Config
     if args.config_name:
-        config = config = AutoConfig.from_pretrained(args.config_name)
+        config = AutoConfig.from_pretrained(args.config_name)
         tokenizer = BertTokenizer(vocab_file='configs/tokenizer/vocab.txt',
                                 config_file='configs/tokenizer/config.json',
                                 special_tokens_map_file='configs/tokenizer/special_tokens_map.json')

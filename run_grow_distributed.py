@@ -81,7 +81,7 @@ MODEL_CLASSES = {
 }
 
 def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> Tuple[int, float]:
-    set_seed(args)  # Added here for reproducibility
+    set_seed(args.seed)  # Added here for reproducibility
 
     """ Train the model """
 
@@ -104,7 +104,11 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     epoch_size = args.train_batch_size * args.max_steps * args.gradient_accumulation_steps
 
     if args.instance_data_path:
-        load_path = os.path.join(args.instance_data_path, f"{args.data_partition}.hdf5")
+        if args.data_partition == 'instance_data':
+            load_path = os.path.join(args.instance_data_path, f"{args.data_partition}.hdf5")
+        else:
+            load_path = os.path.join(args.instance_data_path, f"partitions_m-{args.mask_set}_{args.partition_frac}")
+            load_path = os.path.join(load_path, f"{args.data_partition}.hdf5")
         with h5py.File(load_path, 'r') as f:
             instances = f['instance_order'][:]
         logger.info(f"Loading instance indices from: {load_path}")
@@ -112,7 +116,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         instances = list(range(0, len(train_dataset)))
         random.shuffle(instances)
 
-    instances = instances[:epoch_size]
+    instances = instances[:epoch_size][::-1]
 
     train_sampler = CustomSampler(instances)
     train_dataloader = DataLoader(
@@ -377,7 +381,7 @@ def main():
         datefmt="%m/%d/%Y %H:%M:%S",
         level=logging.INFO,
     )
-    set_seed(args)
+    set_seed(args.seed)
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
 
     # Get Config
