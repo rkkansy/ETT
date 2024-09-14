@@ -36,6 +36,7 @@ import time
 import threading
 import h5py
 from torch.cuda.amp import autocast, GradScaler
+from transformers import AutoConfig, AutoTokenizer
 
 
 import numpy as np
@@ -829,25 +830,19 @@ def get_model_tokenizer(args):
     set_seed(args.seed)
     # Load pretrained model and token
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
+    tokenizer_path = '/configs/tokenizer/'  # Adjust this path
+    # Load Config
 
     # Get Config
     if args.config_name:
-        config = config_class.from_pretrained(args.config_name, cache_dir=args.cache_dir)
-    elif args.model_name_or_path:
-        config = config_class.from_pretrained(args.model_name_or_path, cache_dir=args.cache_dir)
-    else:
-        raise ValueError(
-            "Why do you want the default config?? Please use --config_name or --model_name_or_path"
-        )
-
-    # Get Tokenizer
-    if args.tokenizer_name:
-        tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name, cache_dir=args.cache_dir)
+        config = config = AutoConfig.from_pretrained(args.config_name)
+        tokenizer = BertTokenizer(vocab_file='configs/tokenizer/vocab.txt',
+                                config_file='configs/tokenizer/config.json',
+                                special_tokens_map_file='configs/tokenizer/special_tokens_map.json')
         # BERT always needs lower cased tokens.
         if 'uncased' in args.model_type:
             assert tokenizer.init_kwargs.get("do_lower_case", False)
-    elif args.model_name_or_path:
-        tokenizer = tokenizer_class.from_pretrained(args.model_name_or_path, cache_dir=args.cache_dir)
+
     else:
         raise ValueError(
             "You are instantiating a new {} tokenizer. This is not supported, "
