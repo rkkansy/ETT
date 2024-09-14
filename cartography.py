@@ -403,7 +403,7 @@ def compute_dynamics(args, ckpts, mask_set):
     confidence = np.mean(confidence_list, axis=0)
     entropy = np.mean(entropy_list, axis=0)
     correctness = np.mean(correctness_list, axis=0)
-    variability = np.var(confidence_list, axis=0)
+    variability = np.std(confidence_list, axis=0)
 
     results = {
         "confidence": confidence,
