@@ -555,6 +555,9 @@ def compare_dynamics(args, ckpts):
         correctness_diff_after = np.mean(dynamics["correctness"][checkpoint_amount:]) - np.mean(dynamics1["correctness"][checkpoint_amount:])
         variability_diff_after = np.mean(dynamics["variability"][checkpoint_amount:]) - np.mean(dynamics1["variability"][checkpoint_amount:])
 
+        confidence_diff_m2 = np.mean(dynamics1["confidence"][:checkpoint_amount]) - np.mean(dynamics1["confidence"][checkpoint_amount:])
+        confidence_diff_m1 = np.mean(dynamics["confidence"][:checkpoint_amount]) - np.mean(dynamics["confidence"][checkpoint_amount:])
+
         print(f'Average confidence before checkpoint {i} (mask set 1 vs. mask set 2): {np.mean(dynamics["confidence"][:checkpoint_amount])} vs. {np.mean(dynamics1["confidence"][:checkpoint_amount])} (diff: {confidence_diff_before})')
         print(f'Average confidence after checkpoint {i} (mask set 1 vs. mask set 2): {np.mean(dynamics["confidence"][checkpoint_amount:])} vs. {np.mean(dynamics1["confidence"][checkpoint_amount:])} (diff: {confidence_diff_after})')
 
@@ -566,6 +569,9 @@ def compare_dynamics(args, ckpts):
         
         print(f'Average variability before checkpoint {i} (mask set 1 vs. mask set 2): {np.mean(dynamics["variability"][:checkpoint_amount])} vs. {np.mean(dynamics1["variability"][:checkpoint_amount])} (diff: {variability_diff_before})')
         print(f'Average variability after checkpoint {i} (mask set 1 vs. mask set 2): {np.mean(dynamics["variability"][checkpoint_amount:])} vs. {np.mean(dynamics1["variability"][checkpoint_amount:])} (diff: {variability_diff_after})')
+        
+        print(f'Average confidence before checkpoint {i} vs after checkpoint (mask set 1): {np.mean(dynamics["confidence"][:checkpoint_amount])} vs. {np.mean(dynamics["confidence"][checkpoint_amount:])} (diff: {confidence_diff_m1})')
+        print(f'Average confidence before checkpoint {i} vs after checkpoint (mask set 2): {np.mean(dynamics1["confidence"][:checkpoint_amount])} vs. {np.mean(dynamics1["confidence"][checkpoint_amount:])} (diff: {confidence_diff_m2})')
 
 def main():
     parser = process_args()
