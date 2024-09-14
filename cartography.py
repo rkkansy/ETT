@@ -370,10 +370,9 @@ def plot_metrics(args, data, step_size=1000):
         plt.close()
 
     # Generate plots
-    create_and_save_plot(selected_entropy, selected_confidence, 'Entropy', 'Confidence', 'Confidence over Entropy', 'conf_vs_entropy.png')
-    create_and_save_plot(selected_variability, selected_confidence, 'Variability', 'Confidence', 'Confidence over Variability', 'conf_vs_variability.png')
-    create_and_save_plot(selected_entropy, selected_variability, 'Entropy', 'Variability', 'Entropy over Variability', 'entropy_vs_variability.png')
-
+    create_and_save_plot(selected_entropy, selected_confidence, 'Entropy', 'Confidence', 'Confidence over Entropy', f'conf_vs_entropy_{args.mask_set}.png')
+    create_and_save_plot(selected_variability, selected_confidence, 'Variability', 'Confidence', 'Confidence over Variability', f'conf_vs_variability_{args.mask_set}.png')
+    create_and_save_plot(selected_entropy, selected_variability, 'Entropy', 'Variability', 'Entropy over Variability', f'entropy_vs_variability_{args.mask_set}.png')
 
 def compute_dynamics(args, ckpts, mask_set):
 
