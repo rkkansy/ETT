@@ -413,13 +413,12 @@ def compute_dynamics(args, ckpts, mask_set):
     }
     return results
 
-def compute_partitions(args, ckpts, dynamics, mask_set, frac=0.33):
+def compute_partitions(args, dynamics, mask_set, frac=0.33):
 
     with h5py.File(os.path.join(args.output_dir, "instance_data.hdf5"), 'r') as f:
         instance_order = f['instance_order'][:]
     
     partition_size = int(len(instance_order) * frac)
-    compute_dynamics(args, ckpts, mask_set)
 
     sorted_ids_confidence = np.argsort(dynamics["confidence"])
     sorted_ids_variability = np.argsort(dynamics["variability"])
