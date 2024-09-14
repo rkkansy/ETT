@@ -557,19 +557,19 @@ def compare_dynamics(args, ckpts):
 
         confidence_diff_m2 = np.mean(dynamics1["confidence"][:checkpoint_amount]) - np.mean(dynamics1["confidence"][checkpoint_amount:])
         confidence_diff_m1 = np.mean(dynamics["confidence"][:checkpoint_amount]) - np.mean(dynamics["confidence"][checkpoint_amount:])
-
+        print()
         print(f'Average confidence before checkpoint {i} (mask set 1 vs. mask set 2): {np.mean(dynamics["confidence"][:checkpoint_amount])} vs. {np.mean(dynamics1["confidence"][:checkpoint_amount])} (diff: {confidence_diff_before})')
         print(f'Average confidence after checkpoint {i} (mask set 1 vs. mask set 2): {np.mean(dynamics["confidence"][checkpoint_amount:])} vs. {np.mean(dynamics1["confidence"][checkpoint_amount:])} (diff: {confidence_diff_after})')
-
+        print()
         print(f'Average entropy before checkpoint {i} (mask set 1 vs. mask set 2): {np.mean(dynamics["entropy"][:checkpoint_amount])} vs. {np.mean(dynamics1["entropy"][:checkpoint_amount])} (diff: {entropy_diff_before})')
         print(f'Average entropy after checkpoint {i} (mask set 1 vs. mask set 2): {np.mean(dynamics["entropy"][checkpoint_amount:])} vs. {np.mean(dynamics1["entropy"][checkpoint_amount:])} (diff: {entropy_diff_after})')
-        
+        print()
         print(f'Average correctness before checkpoint {i} (mask set 1 vs. mask set 2): {np.mean(dynamics["correctness"][:checkpoint_amount])} vs. {np.mean(dynamics1["correctness"][:checkpoint_amount])} (diff: {correctness_diff_before})')
         print(f'Average correctness after checkpoint {i} (mask set 1 vs. mask set 2): {np.mean(dynamics["correctness"][checkpoint_amount:])} vs. {np.mean(dynamics1["correctness"][checkpoint_amount:])} (diff: {correctness_diff_after})')
-        
+        print()
         print(f'Average variability before checkpoint {i} (mask set 1 vs. mask set 2): {np.mean(dynamics["variability"][:checkpoint_amount])} vs. {np.mean(dynamics1["variability"][:checkpoint_amount])} (diff: {variability_diff_before})')
         print(f'Average variability after checkpoint {i} (mask set 1 vs. mask set 2): {np.mean(dynamics["variability"][checkpoint_amount:])} vs. {np.mean(dynamics1["variability"][checkpoint_amount:])} (diff: {variability_diff_after})')
-        
+        print()
         print(f'Average confidence before checkpoint {i} vs after checkpoint (mask set 1): {np.mean(dynamics["confidence"][:checkpoint_amount])} vs. {np.mean(dynamics["confidence"][checkpoint_amount:])} (diff: {confidence_diff_m1})')
         print(f'Average confidence before checkpoint {i} vs after checkpoint (mask set 2): {np.mean(dynamics1["confidence"][:checkpoint_amount])} vs. {np.mean(dynamics1["confidence"][checkpoint_amount:])} (diff: {confidence_diff_m2})')
 
