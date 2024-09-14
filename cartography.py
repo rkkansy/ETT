@@ -561,9 +561,10 @@ def main():
     if args.compute_dynamics:
         res = compute_dynamics(args, args.dynamics_ckpts_list, args.mask_set)
         compute_partitions(args, res, args.mask_set, frac=args.partition_frac)
+        plot_metrics(args, res, 100)
 
     compare_dynamics(args, args.dynamics_ckpts_list)
-    plot_metrics(args, res, 100)
+
 
 if __name__ == "__main__":
     main()
