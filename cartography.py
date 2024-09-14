@@ -545,15 +545,28 @@ def compare_dynamics(args, ckpts):
         print(f'Number of data points in dynamics at checkpoint {i}: {len(dynamics["confidence"])}')
         print(f'Number of data points in dynamics1 at checkpoint {i}: {len(dynamics1["confidence"])}')
 
-        print(f'Average confidence before checkpoint {i}: {np.mean(dynamics["confidence"][:checkpoint_amount])} vs. {np.mean(dynamics1["confidence"][:checkpoint_amount])}')
-        print(f'Average entropy before checkpoint {i}: {np.mean(dynamics["entropy"][:checkpoint_amount])} vs. {np.mean(dynamics1["entropy"][:checkpoint_amount])}')
-        print(f'Average correctness before checkpoint {i}: {np.mean(dynamics["correctness"][:checkpoint_amount])} vs. {np.mean(dynamics1["correctness"][:checkpoint_amount])}')
-        print(f'Average variability before checkpoint {i}: {np.mean(dynamics["variability"][:checkpoint_amount])} vs. {np.mean(dynamics1["variability"][:checkpoint_amount])}')
+        confidence_diff_before = np.mean(dynamics["confidence"][:checkpoint_amount]) - np.mean(dynamics1["confidence"][:checkpoint_amount])
+        entropy_diff_before = np.mean(dynamics["entropy"][:checkpoint_amount]) - np.mean(dynamics1["entropy"][:checkpoint_amount])
+        correctness_diff_before = np.mean(dynamics["correctness"][:checkpoint_amount]) - np.mean(dynamics1["correctness"][:checkpoint_amount])
+        variability_diff_before = np.mean(dynamics["variability"][:checkpoint_amount]) - np.mean(dynamics1["variability"][:checkpoint_amount])
 
-        print(f'Average confidence after checkpoint {i}: {np.mean(dynamics["confidence"][checkpoint_amount:])} vs. {np.mean(dynamics1["confidence"][checkpoint_amount:])}')
-        print(f'Average entropy after checkpoint {i}: {np.mean(dynamics["entropy"][checkpoint_amount:])} vs. {np.mean(dynamics1["entropy"][checkpoint_amount:])}')
-        print(f'Average correctness after checkpoint {i}: {np.mean(dynamics["correctness"][checkpoint_amount:])} vs. {np.mean(dynamics1["correctness"][checkpoint_amount:])}')
-        print(f'Average variability after checkpoint {i}: {np.mean(dynamics["variability"][checkpoint_amount:])} vs. {np.mean(dynamics1["variability"][checkpoint_amount:])}')
+        confidence_diff_after = np.mean(dynamics["confidence"][checkpoint_amount:]) - np.mean(dynamics1["confidence"][checkpoint_amount:])
+        entropy_diff_after = np.mean(dynamics["entropy"][checkpoint_amount:]) - np.mean(dynamics1["entropy"][checkpoint_amount:])
+        correctness_diff_after = np.mean(dynamics["correctness"][checkpoint_amount:]) - np.mean(dynamics1["correctness"][checkpoint_amount:])
+        variability_diff_after = np.mean(dynamics["variability"][checkpoint_amount:]) - np.mean(dynamics1["variability"][checkpoint_amount:])
+
+        print(f'Average confidence before checkpoint {i}: {np.mean(dynamics["confidence"][:checkpoint_amount])} vs. {np.mean(dynamics1["confidence"][:checkpoint_amount])} (diff: {confidence_diff_before})')
+        print(f'Average confidence after checkpoint {i}: {np.mean(dynamics["confidence"][checkpoint_amount:])} vs. {np.mean(dynamics1["confidence"][checkpoint_amount:])} (diff: {confidence_diff_after})')
+
+        print(f'Average entropy before checkpoint {i}: {np.mean(dynamics["entropy"][:checkpoint_amount])} vs. {np.mean(dynamics1["entropy"][:checkpoint_amount])} (diff: {entropy_diff_before})')
+        print(f'Average entropy after checkpoint {i}: {np.mean(dynamics["entropy"][checkpoint_amount:])} vs. {np.mean(dynamics1["entropy"][checkpoint_amount:])} (diff: {entropy_diff_after})')
+        
+        print(f'Average correctness before checkpoint {i}: {np.mean(dynamics["correctness"][:checkpoint_amount])} vs. {np.mean(dynamics1["correctness"][:checkpoint_amount])} (diff: {correctness_diff_before})')
+        print(f'Average correctness after checkpoint {i}: {np.mean(dynamics["correctness"][checkpoint_amount:])} vs. {np.mean(dynamics1["correctness"][checkpoint_amount:])} (diff: {correctness_diff_after})')
+        
+        print(f'Average variability before checkpoint {i}: {np.mean(dynamics["variability"][:checkpoint_amount])} vs. {np.mean(dynamics1["variability"][:checkpoint_amount])} (diff: {variability_diff_before})')
+        print(f'Average variability after checkpoint {i}: {np.mean(dynamics["variability"][checkpoint_amount:])} vs. {np.mean(dynamics1["variability"][checkpoint_amount:])} (diff: {variability_diff_after})')
+
 
 def main():
     parser = process_args()
