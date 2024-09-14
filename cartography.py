@@ -381,10 +381,11 @@ def compute_dynamics(args, ckpts, mask_set):
     correctness_list = []
     file_path = os.path.join(args.output_dir, f"dynamics_data_{mask_set}.hdf5")
 
-    with h5py.File(file_path, 'r') as file:
-        print("Datasets in the HDF5 file:")
-        for name in file.keys():
-            print(name)
+    if args.verbose:
+        with h5py.File(file_path, 'r') as file:
+            print("Datasets in the HDF5 file:")
+            for name in file.keys():
+                print(name)
 
     for i in ckpts:
         with h5py.File(file_path, 'r') as f:
