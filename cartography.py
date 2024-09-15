@@ -328,8 +328,8 @@ def plot_metrics(args, data, step_size=1000):
     correctness = data["correctness"]
 
     # Create colormap and normalize based on the correctness values
-    cmap = plt.cm.viridis  # This can be changed to any other colormap (e.g., plt.cm.coolwarm)
-    norm = plt.Normalize(vmin=0, vmax=1)  # Assuming correctness ranges from 0 to 1
+    cmap = plt.cm.viridis
+    norm = plt.Normalize(vmin=0, vmax=1)
 
     # Create the directory if it does not exist
     output_path = os.path.join(args.output_dir, "dynamic_plots")
@@ -343,38 +343,47 @@ def plot_metrics(args, data, step_size=1000):
     selected_entropy_variability = [entropy_variability[i] for i in indices]
     selected_correctness = [correctness[i] for i in indices]
 
-    # Function to create and save scatter plots and histograms together
-    def create_and_save_plot(x, y, xlabel, ylabel, title, filename):
-        # Setting up the grid
+    def create_and_save_plot(x, y, xlabel, ylabel, title, filename, invert_y=False):
         fig = plt.figure(figsize=(12, 6))
-        gs = gridspec.GridSpec(1, 2, width_ratios=[3, 1])  # Control the width ratio of scatter to histogram
+        gs = gridspec.GridSpec(2, 3, width_ratios=[4, 1, 1], wspace=0.3)
 
-        # Scatter plot
-        ax1 = fig.add_subplot(gs[0])
+        # Main scatter plot
+        ax1 = fig.add_subplot(gs[0:2, 0:2])
         sc = ax1.scatter(x, y, c=selected_correctness, cmap=cmap, norm=norm, alpha=0.7)
         ax1.set_xlabel(xlabel)
         ax1.set_ylabel(ylabel)
         ax1.set_title(title)
+        if invert_y:
+            ax1.invert_yaxis()
 
-        # Colorbar for correctness
+        # Add colorbar to the main plot
         cbar = fig.colorbar(sc, ax=ax1)
         cbar.set_label('Correctness')
 
-        # Histogram for the x-axis values
-        ax2 = fig.add_subplot(gs[1])
-        ax2.hist(x, bins=20, alpha=0.3, color='grey')
-        ax2.set_xlabel(xlabel)
+        # Density plot for X (right top)
+        ax2 = fig.add_subplot(gs[0, 2])
+        ax2.hist(x, bins=20, orientation='vertical', alpha=0.7, color='grey')
         ax2.set_ylabel('Density')
-        ax2.set_title(f'Density of {xlabel}')
+        ax2.set_xlabel(f'{xlabel}')
+        ax2.xaxis.set_label_position('top')
+        ax2.xaxis.tick_bottom()  # Keep ticks on the top side
+
+        # Density plot for Y (right bottom)
+        ax3 = fig.add_subplot(gs[1, 2])
+        ax3.hist(y, bins=20, orientation='vertical', alpha=0.7, color='grey')
+        ax3.set_ylabel('Density')
+        ax3.set_xlabel(f'{ylabel}')
+        ax3.xaxis.set_label_position('bottom')
+        ax3.xaxis.tick_bottom()  # Keep ticks on the top side
 
         plt.tight_layout()
         plt.savefig(os.path.join(output_path, filename))
         plt.close()
 
-    # Generate plots
     create_and_save_plot(selected_entropy, selected_confidence, 'Entropy', 'Confidence', 'Confidence over Entropy', f'conf_vs_entropy_{args.mask_set}.png')
     create_and_save_plot(selected_confidence_variability, selected_confidence, 'Confidence Variability', 'Confidence', 'Confidence over Variability', f'conf_vs_conf_variability_{args.mask_set}.png')
-    create_and_save_plot(selected_entropy_variability, selected_entropy, 'Entropy Variability', 'Entropy', 'Entropy over Variability', f'entropy_vs_entropy_variability_{args.mask_set}.png')
+    create_and_save_plot(selected_entropy_variability, selected_entropy, 'Entropy Variability', 'Entropy', 'Entropy over Entropy Variability', f'entropy_vs_entropy_variability_{args.mask_set}.png', invert_y=True)
+    create_and_save_plot(selected_entropy_variability, selected_confidence_variability, 'Entropy Variability', 'Confidence Variability', 'Entropy Variability over Confidence Variability', f'confidence_variability_vs_entropy_variability_{args.mask_set}.png')
 
 def compute_dynamics(args, ckpts, mask_set):
 
