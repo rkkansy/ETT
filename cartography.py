@@ -445,23 +445,6 @@ def compute_partitions(args, dynamics, mask_set, frac=0.33):
 
     high_entropy_instances = instance_order[sorted_ids_entropy[::-1][:partition_size]]
     low_entropy_instances = instance_order[sorted_ids_entropy[:partition_size]]
-
-    partition_folder_path = os.path.join(args.output_dir, f"partitions_m-{mask_set}_{frac}")
-
-    os.makedirs(partition_folder_path, exist_ok=True)
-
-    with h5py.File(os.path.join(partition_folder_path, "easy.hdf5"), 'a') as f:
-        f.create_dataset(f"instance_order", data=easy_instances, dtype=np.int32)
-    with h5py.File(os.path.join(partition_folder_path, "hard.hdf5"), 'a') as f:
-        f.create_dataset(f"instance_order", data=hard_instances, dtype=np.int32)
-    with h5py.File(os.path.join(partition_folder_path, "ambiguous.hdf5"), 'a') as f:
-        f.create_dataset(f"instance_order", data=confidence_ambiguous_instances, dtype=np.int32)
-    with h5py.File(os.path.join(partition_folder_path, "entropy_ambiguous.hdf5"), 'a') as f:
-        f.create_dataset(f"instance_order", data=entropy_ambiguous_instances, dtype=np.int32)
-    with h5py.File(os.path.join(partition_folder_path, "high_entropy.hdf5"), 'a') as f:
-        f.create_dataset(f"instance_order", data=high_entropy_instances, dtype=np.int32)
-    with h5py.File(os.path.join(partition_folder_path, "low_entropy.hdf5"), 'a') as f:
-        f.create_dataset(f"instance_order", data=low_entropy_instances, dtype=np.int32)
     
     results = {
         "easy_instances": easy_instances,
@@ -591,14 +574,39 @@ def compare_dynamics(args, ckpts):
         print(f'Average confidence before checkpoint {i} vs after checkpoint (mask set 1): {np.mean(dynamics["confidence"][:checkpoint_amount])} vs. {np.mean(dynamics["confidence"][checkpoint_amount:])} (diff: {confidence_diff_m1})')
         print(f'Average confidence before checkpoint {i} vs after checkpoint (mask set 2): {np.mean(dynamics1["confidence"][:checkpoint_amount])} vs. {np.mean(dynamics1["confidence"][checkpoint_amount:])} (diff: {confidence_diff_m2})')
 
+def compare_partitions(parts1, parts2):
+    results = {}
+    partition_types = ["easy_instances", "hard_instances", "ambiguous_instances", 
+                       "entropy_ambiguous_instances", "high_entropy_instances", "low_entropy_instances"]
+    
+    for part_type in partition_types:
+        # Find the intersection of instances between the corresponding partitions
+        common_instances = np.intersect1d(parts1[part_type], parts2[part_type])
+        # Calculate the number of common instances
+        num_common = len(common_instances)
+        # Calculate the percentage of common instances relative to the first partition set
+        percentage_common = (num_common / len(parts1[part_type]) * 100) if parts1[part_type].size > 0 else 0
+        results[part_type] = (num_common, percentage_common)
+    
+    return results
+
 def main():
     parser = process_args()
     args = parser.parse_args()
 
     if args.compute_dynamics:
-        res = compute_dynamics(args, args.dynamics_ckpts_list, args.mask_set)
-        compute_partitions(args, res, args.mask_set, frac=args.partition_frac)
-        plot_metrics(args, res, 100)
+        args.output_dir = "/project/data/models/BERT-small-10k"
+        res_small = compute_dynamics(args, args.dynamics_ckpts_list, args.mask_set)
+        args.output_dir = "/project/data/models/BERT-base-10k"
+        res_base = compute_dynamics(args, args.dynamics_ckpts_list, args.mask_set)
+ 
+        parts_small = compute_partitions(args, res_small, args.mask_set, frac=args.partition_frac)
+        parts_base = compute_partitions(args, res_base, args.mask_set, frac=args.partition_frac)
+
+        comparison_results = compare_partitions(parts_small, parts_base)
+        print("Comparison of partitions:")
+        for part_type, (count, percentage) in comparison_results.items():
+            print(f"{part_type}: {count} common instances ({percentage:.2f}% of parts_small)")
 
     compare_dynamics(args, args.dynamics_ckpts_list)
 
