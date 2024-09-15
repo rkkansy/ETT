@@ -43,6 +43,7 @@ from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampl
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm, trange
 import h5py
+from transformers import AutoConfig, AutoTokenizer
 
 from transformers import (
     WEIGHTS_NAME,
@@ -386,22 +387,13 @@ def main():
 
     # Get Config
     if args.config_name:
-        config = config_class.from_pretrained(args.config_name, cache_dir=args.cache_dir)
-    elif args.model_name_or_path:
-        config = config_class.from_pretrained(args.model_name_or_path, cache_dir=args.cache_dir)
-    else:
-        raise ValueError(
-            "Why do you want the default config?? Please use --config_name or --model_name_or_path"
-        )
-
-    # Get Tokenizer
-    if args.tokenizer_name:
-        tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name, cache_dir=args.cache_dir)
+        config = AutoConfig.from_pretrained(args.config_name)
+        tokenizer = BertTokenizer(vocab_file='configs/tokenizer/vocab.txt',
+                                config_file='configs/tokenizer/config.json',
+                                special_tokens_map_file='configs/tokenizer/special_tokens_map.json')
         # BERT always needs lower cased tokens.
         if 'uncased' in args.model_type:
             assert tokenizer.init_kwargs.get("do_lower_case", False)
-    elif args.model_name_or_path:
-        tokenizer = tokenizer_class.from_pretrained(args.model_name_or_path, cache_dir=args.cache_dir)
     else:
         raise ValueError(
             "You are instantiating a new {} tokenizer. This is not supported, "
