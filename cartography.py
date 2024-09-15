@@ -323,7 +323,8 @@ def get_percent_indices(confidences, percent):
 def plot_metrics(args, data, step_size=1000):
     confidence = data["confidence"]
     entropy = data["entropy"]
-    variability = data["variability"]
+    confidence_variability = data["confidence_variability"]
+    entropy_variability = data["entropy_variability"]
     correctness = data["correctness"]
 
     # Create colormap and normalize based on the correctness values
@@ -338,7 +339,8 @@ def plot_metrics(args, data, step_size=1000):
     indices = range(0, len(confidence), step_size)
     selected_confidence = [confidence[i] for i in indices]
     selected_entropy = [entropy[i] for i in indices]
-    selected_variability = [variability[i] for i in indices]
+    selected_confidence_variability = [confidence_variability[i] for i in indices]
+    selected_entropy_variability = [entropy_variability[i] for i in indices]
     selected_correctness = [correctness[i] for i in indices]
 
     # Function to create and save scatter plots and histograms together
@@ -371,8 +373,8 @@ def plot_metrics(args, data, step_size=1000):
 
     # Generate plots
     create_and_save_plot(selected_entropy, selected_confidence, 'Entropy', 'Confidence', 'Confidence over Entropy', f'conf_vs_entropy_{args.mask_set}.png')
-    create_and_save_plot(selected_variability, selected_confidence, 'Variability', 'Confidence', 'Confidence over Variability', f'conf_vs_variability_{args.mask_set}.png')
-    create_and_save_plot(selected_entropy, selected_variability, 'Entropy', 'Variability', 'Entropy over Variability', f'entropy_vs_variability_{args.mask_set}.png')
+    create_and_save_plot(selected_confidence_variability, selected_confidence, 'Confidence Variability', 'Confidence', 'Confidence over Variability', f'conf_vs_conf_variability_{args.mask_set}.png')
+    create_and_save_plot(selected_entropy_variability, selected_entropy, 'Entropy Variability', 'Entropy', 'Entropy over Variability', f'entropy_vs_entropy_variability_{args.mask_set}.png')
 
 def compute_dynamics(args, ckpts, mask_set):
 
@@ -399,17 +401,18 @@ def compute_dynamics(args, ckpts, mask_set):
                 print(f"Entropy at checkpoint {i}: ", f[f'entropy_ckpt_{i}'][:])
                 print(f"Confidence at checkpoint {i}: ", f[f'confidence_ckpt_{i}'][:])
 
-
     confidence = np.mean(confidence_list, axis=0)
     entropy = np.mean(entropy_list, axis=0)
     correctness = np.mean(correctness_list, axis=0)
-    variability = np.std(confidence_list, axis=0)
+    confidence_variability = np.std(confidence_list, axis=0)
+    entropy_variability = np.std(entropy_list, axis=0)
 
     results = {
         "confidence": confidence,
         "entropy": entropy,
         "correctness": correctness,
-        "variability": variability,
+        "confidence_variability": confidence_variability,
+        "entropy_variability": entropy_variability,
     }
     return results
 
@@ -421,12 +424,15 @@ def compute_partitions(args, dynamics, mask_set, frac=0.33):
     partition_size = int(len(instance_order) * frac)
 
     sorted_ids_confidence = np.argsort(dynamics["confidence"])
-    sorted_ids_variability = np.argsort(dynamics["variability"])
+    sorted_ids_confidence_variability = np.argsort(dynamics["confidence_variability"])
+    sorted_ids_entropy_variability = np.argsort(dynamics["entropy_variability"])
+
     sorted_ids_entropy = np.argsort(dynamics["entropy"])
 
     easy_instances = instance_order[sorted_ids_confidence[::-1][:partition_size]]
     hard_instances = instance_order[sorted_ids_confidence[:partition_size]]
-    ambiguous_instances = instance_order[sorted_ids_variability[::-1][:partition_size]]
+    confidence_ambiguous_instances = instance_order[sorted_ids_confidence_variability[::-1][:partition_size]]
+    entropy_ambiguous_instances = instance_order[sorted_ids_entropy_variability[::-1][:partition_size]]
 
     high_entropy_instances = instance_order[sorted_ids_entropy[::-1][:partition_size]]
     low_entropy_instances = instance_order[sorted_ids_entropy[:partition_size]]
@@ -440,7 +446,9 @@ def compute_partitions(args, dynamics, mask_set, frac=0.33):
     with h5py.File(os.path.join(partition_folder_path, "hard.hdf5"), 'a') as f:
         f.create_dataset(f"instance_order", data=hard_instances, dtype=np.int32)
     with h5py.File(os.path.join(partition_folder_path, "ambiguous.hdf5"), 'a') as f:
-        f.create_dataset(f"instance_order", data=ambiguous_instances, dtype=np.int32)
+        f.create_dataset(f"instance_order", data=confidence_ambiguous_instances, dtype=np.int32)
+    with h5py.File(os.path.join(partition_folder_path, "entropy_ambiguous.hdf5"), 'a') as f:
+        f.create_dataset(f"instance_order", data=entropy_ambiguous_instances, dtype=np.int32)
     with h5py.File(os.path.join(partition_folder_path, "high_entropy.hdf5"), 'a') as f:
         f.create_dataset(f"instance_order", data=high_entropy_instances, dtype=np.int32)
     with h5py.File(os.path.join(partition_folder_path, "low_entropy.hdf5"), 'a') as f:
@@ -449,7 +457,8 @@ def compute_partitions(args, dynamics, mask_set, frac=0.33):
     results = {
         "easy_instances": easy_instances,
         "hard_instances": hard_instances,
-        "ambiguous_instances": ambiguous_instances,
+        "ambiguous_instances": confidence_ambiguous_instances,
+        "entropy_ambiguous_instances": entropy_ambiguous_instances,
         "high_entropy_instances": high_entropy_instances,
         "low_entropy_instances": low_entropy_instances
     }
@@ -548,12 +557,12 @@ def compare_dynamics(args, ckpts):
         confidence_diff_before = np.mean(dynamics["confidence"][:checkpoint_amount]) - np.mean(dynamics1["confidence"][:checkpoint_amount])
         entropy_diff_before = np.mean(dynamics["entropy"][:checkpoint_amount]) - np.mean(dynamics1["entropy"][:checkpoint_amount])
         correctness_diff_before = np.mean(dynamics["correctness"][:checkpoint_amount]) - np.mean(dynamics1["correctness"][:checkpoint_amount])
-        variability_diff_before = np.mean(dynamics["variability"][:checkpoint_amount]) - np.mean(dynamics1["variability"][:checkpoint_amount])
+        variability_diff_before = np.mean(dynamics["confidence_variability"][:checkpoint_amount]) - np.mean(dynamics1["confidence_variability"][:checkpoint_amount])
 
         confidence_diff_after = np.mean(dynamics["confidence"][checkpoint_amount:]) - np.mean(dynamics1["confidence"][checkpoint_amount:])
         entropy_diff_after = np.mean(dynamics["entropy"][checkpoint_amount:]) - np.mean(dynamics1["entropy"][checkpoint_amount:])
         correctness_diff_after = np.mean(dynamics["correctness"][checkpoint_amount:]) - np.mean(dynamics1["correctness"][checkpoint_amount:])
-        variability_diff_after = np.mean(dynamics["variability"][checkpoint_amount:]) - np.mean(dynamics1["variability"][checkpoint_amount:])
+        variability_diff_after = np.mean(dynamics["confidence_variability"][checkpoint_amount:]) - np.mean(dynamics1["confidence_variability"][checkpoint_amount:])
 
         confidence_diff_m2 = np.mean(dynamics1["confidence"][:checkpoint_amount]) - np.mean(dynamics1["confidence"][checkpoint_amount:])
         confidence_diff_m1 = np.mean(dynamics["confidence"][:checkpoint_amount]) - np.mean(dynamics["confidence"][checkpoint_amount:])
@@ -567,8 +576,8 @@ def compare_dynamics(args, ckpts):
         print(f'Average correctness before checkpoint {i} (mask set 1 vs. mask set 2): {np.mean(dynamics["correctness"][:checkpoint_amount])} vs. {np.mean(dynamics1["correctness"][:checkpoint_amount])} (diff: {correctness_diff_before})')
         print(f'Average correctness after checkpoint {i} (mask set 1 vs. mask set 2): {np.mean(dynamics["correctness"][checkpoint_amount:])} vs. {np.mean(dynamics1["correctness"][checkpoint_amount:])} (diff: {correctness_diff_after})')
         print()
-        print(f'Average variability before checkpoint {i} (mask set 1 vs. mask set 2): {np.mean(dynamics["variability"][:checkpoint_amount])} vs. {np.mean(dynamics1["variability"][:checkpoint_amount])} (diff: {variability_diff_before})')
-        print(f'Average variability after checkpoint {i} (mask set 1 vs. mask set 2): {np.mean(dynamics["variability"][checkpoint_amount:])} vs. {np.mean(dynamics1["variability"][checkpoint_amount:])} (diff: {variability_diff_after})')
+        print(f'Average variability before checkpoint {i} (mask set 1 vs. mask set 2): {np.mean(dynamics["confidence_variability"][:checkpoint_amount])} vs. {np.mean(dynamics1["confidence_variability"][:checkpoint_amount])} (diff: {variability_diff_before})')
+        print(f'Average variability after checkpoint {i} (mask set 1 vs. mask set 2): {np.mean(dynamics["confidence_variability"][checkpoint_amount:])} vs. {np.mean(dynamics1["confidence_variability"][checkpoint_amount:])} (diff: {variability_diff_after})')
         print()
         print(f'Average confidence before checkpoint {i} vs after checkpoint (mask set 1): {np.mean(dynamics["confidence"][:checkpoint_amount])} vs. {np.mean(dynamics["confidence"][checkpoint_amount:])} (diff: {confidence_diff_m1})')
         print(f'Average confidence before checkpoint {i} vs after checkpoint (mask set 2): {np.mean(dynamics1["confidence"][:checkpoint_amount])} vs. {np.mean(dynamics1["confidence"][checkpoint_amount:])} (diff: {confidence_diff_m2})')
