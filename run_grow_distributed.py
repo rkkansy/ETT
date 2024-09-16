@@ -117,6 +117,9 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         instances = list(range(0, len(train_dataset)))
         random.shuffle(instances)
 
+    if args.shuffle:
+        random.shuffle(instances)
+
     instances = instances[:epoch_size][::-1]
 
     train_sampler = CustomSampler(instances)
