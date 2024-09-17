@@ -1,15 +1,15 @@
 logger = log
 learning_rates=("4e-5")
 batch_sizes=(16)
-seeds=(42)
+seeds=(10 13 42 786783)
 task_names=("mrpc" "cola" "rte" "stsb")
-long_task_names=("qqp" "qnli" "mnli" "sst2")
+long_task_names=()
 python_script=run_glue.py
 model_path=""
 
 for seed in "${seeds[@]}"; do
 
-    model_name="-${seed}-"
+    model_name="bert-base-grown-${seed}-"
     common_params="--model_name_or_path ${model_path} --seed ${seed} --logging_steps 100 --max_seq_length 128 --overwrite_output_dir --do_train --do_eval --evaluation_strategy steps --gradient_accumulation_steps 1 --weight_decay 0.01 --max_grad_norm 1.0 --num_train_epochs 5 --lr_scheduler_type cosine --warmup_ratio 0.1"
 
     for lr in "${learning_rates[@]}"; do
